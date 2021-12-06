@@ -1,0 +1,43 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<Project ToolsVersion="4.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <ItemGroup>
+    <Filter Include="inf_app">
+      <UniqueIdentifier>{e56dd664-5069-4e5a-8189-a87b069efa94}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="source">
+      <UniqueIdentifier>{4FC737F1-C7A5-4376-A066-2A32D752A2FF}</UniqueIdentifier>
+      <Extensions>cpp;c;cc;cxx;def;odl;idl;hpj;bat;asm;asmx</Extensions>
+    </Filter>
+  </ItemGroup>
+  <ItemGroup>
+    <ClCompile Include="..\app_test.cpp">
+      <Filter>source</Filter>
+    </ClCompile>
+    <ClCompile Include="..\..\core\inf_program.cpp">
+      <Filter>inf_app</Filter>
+    </ClCompile>
+    <ClCompile Include="..\..\core\inf_app.cpp">
+      <Filter>inf_app</Filter>
+    </ClCompile>
+    <ClCompile Include="..\..\base\inf_message.cpp">
+      <Filter>source</Filter>
+    </ClCompile>
+    <ClCompile Include="..\..\base\inf_parameters.cpp">
+      <Filter>source</Filter>
+    </ClCompile>
+    <ClCompile Include="..\..\base\inf_pipe.cpp">
+      <Filter>source</Filter>
+    </ClCompile>
+  </ItemGroup>
+  <ItemGroup>
+    <ClInclude Include="..\..\core\inf_app.h">
+      <Filter>inf_app</Filter>
+    </ClInclude>
+    <ClInclude Include="..\..\..\base\inf_parameter.h">
+      <Filter>inf_app</Filter>
+    </ClInclude>
+    <ClInclude Include="..\..\core\inf_app_diagnostics.h">
+      <Filter>inf_app</Filter>
+    </ClInclude>
+  </ItemGroup>
+</Project>
