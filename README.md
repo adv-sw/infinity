@@ -19,6 +19,6 @@ Clone : hg clone https://hg.mozilla.org/mozilla-unified -r 8802d620459d50ea64882
 
 5. Copy mozilla dist/bin directory to [infinity]/programs/mozilla
 
-e.g. C:\Program Files\Infinity\programs\mozilla
+            e.g. C:\Program Files\Infinity\programs\mozilla
 
 6. Run infinity with test content to test app & any modifications.
