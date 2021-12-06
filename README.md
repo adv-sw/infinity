@@ -27,7 +27,8 @@ Building infinity mozilla/gecko plugin (modified firefox).
 
             e.g. C:\Program Files\Infinity\programs\mozilla
 
-6. Turn on autoplay videos in firefox.js to verify video plays before videocontrols are fixed 
+6. Turn on autoplay videos in firefox.js to verify video plays before videocontrols are fixed.
+
              pref("media.autoplay.default", 0);
 
 7. Run infinity with test content to test app & any modifications.
