@@ -1,0 +1,4063 @@
+diff --git a/browser/app/nsBrowserApp.cpp b/browser/app/nsBrowserApp.cpp
+--- a/browser/app/nsBrowserApp.cpp
++++ b/browser/app/nsBrowserApp.cpp
+@@ -191,17 +191,38 @@ static int do_main(int argc, char* argv[
+ 
+   BootstrapConfig config;
+ 
+   if (appDataFile && *appDataFile) {
+     config.appData = nullptr;
+     config.appDataPath = appDataFile;
+   } else {
+     // no -app flag so we use the compiled-in app data
++
++#ifdef INF_PATCH
++   
++    // ... with a twist :)
++    // Prevent clashes with standard firefox profile at runtime so we can run both simultaneously when desired.
++
++    // Duplicate app data as standard version is const & we want to modify it.
++    auto __inf_appdata = new mozilla::StaticXREAppData;
++    memcpy(__inf_appdata, &sAppData, sizeof(mozilla::StaticXREAppData));
++
++    __inf_appdata->vendor = "xMozilla";  // was Mozilla
++    __inf_appdata->name = "xFirefox"; // was Firefox
++    __inf_appdata->remotingName = "firefox"; // Required so sites that check browser ID will function.
++    config.appData = __inf_appdata;
++
++    // __inf_appdata leaks but runtime will clear it up on exit.
++
++#else
+     config.appData = &sAppData;
++
++#endif // INF_PATCH
++
+     config.appDataPath = kDesktopFolder;
+   }
+ 
+ #if defined(XP_WIN) && defined(MOZ_SANDBOX)
+   sandbox::BrokerServices* brokerServices =
+       sandboxing::GetInitializedBrokerServices();
+   sandboxing::PermissionsService* permissionsService =
+       sandboxing::GetPermissionsService();
+diff --git a/browser/app/profile/firefox.js b/browser/app/profile/firefox.js
+--- a/browser/app/profile/firefox.js
++++ b/browser/app/profile/firefox.js
+@@ -2578,8 +2578,11 @@ pref("first-startup.timeout", 30000);
+ // are expected to go away once a standardized alternative becomes
+ // available.
+ pref("svg.context-properties.content.allowed-domains", "profile.accounts.firefox.com,profile.stage.mozaws.net");
+ 
+ // Preference that allows individual users to disable Firefox Translations.
+ #ifdef NIGHTLY_BUILD
+   pref("extensions.translations.disabled", true);
+ #endif
++
++// INF_PATCH: Currently required to enable access to WebRTC camera, mic
++pref("media.navigator.permission.disabled", true);
+diff --git a/browser/components/BrowserContentHandler.jsm b/browser/components/BrowserContentHandler.jsm
+--- a/browser/components/BrowserContentHandler.jsm
++++ b/browser/components/BrowserContentHandler.jsm
+@@ -214,16 +214,20 @@ function getPostUpdateOverridePage(updat
+  */
+ function openBrowserWindow(
+   cmdLine,
+   triggeringPrincipal,
+   urlOrUrlList,
+   postData = null,
+   forcePrivate = false
+ ) {
++  // INF_PATCH: Block unwanted content pushes. 
++  let env = Cc["@mozilla.org/process/environment;1"].getService(Ci.nsIEnvironment);
++  if (env.get("MOZ_GECKO_SERVER"))
++    return false;	
+   let chromeURL = AppConstants.BROWSER_CHROME_URL;
+   const isStartup =
+     cmdLine && cmdLine.state == Ci.nsICommandLine.STATE_INITIAL_LAUNCH;
+ 
+   let args;
+   if (!urlOrUrlList) {
+     // Just pass in the defaultArgs directly. We'll use system principal on the other end.
+     args = [gBrowserContentHandler.getArgs(isStartup)];
+diff --git a/browser/components/BrowserGlue.jsm b/browser/components/BrowserGlue.jsm
+--- a/browser/components/BrowserGlue.jsm
++++ b/browser/components/BrowserGlue.jsm
+@@ -745,16 +745,22 @@ let JSWINDOWACTORS = {
+       moduleURI: "resource:///actors/WebRTCChild.jsm",
+     },
+ 
+     allFrames: true,
+   },
+ };
+ 
+ (function earlyBlankFirstPaint() {
++  // INF_PATCH[BEGIN]
++  let env = Cc["@mozilla.org/process/environment;1"].getService(Ci.nsIEnvironment);
++  if (env.get("MOZ_GECKO_SERVER"))
++   return;	
++  // INF_PATCH[END] 
++
+   let startTime = Cu.now();
+   if (
+     AppConstants.platform == "macosx" ||
+     !Services.prefs.getBoolPref("browser.startup.blankWindow", false)
+   ) {
+     return;
+   }
+ 
+diff --git a/build/application.ini.in b/build/application.ini.in
+--- a/build/application.ini.in
++++ b/build/application.ini.in
+@@ -34,23 +34,26 @@ SourceRepository=@MOZ_SOURCE_REPO@
+ SourceStamp=@MOZ_SOURCE_STAMP@
+ #endif
+ ID=@MOZ_APP_ID@
+ 
+ [Gecko]
+ MinVersion=@GRE_MILESTONE@
+ MaxVersion=@GRE_MILESTONE@
+ 
++; INF_PATCH[BEGIN]
++;: Profile migrator & crash reporter off for now.
++;  TODO: Use config variables rather than hardwire this ini file.
++
+ [XRE]
+-#ifdef MOZ_PROFILE_MIGRATOR
+-EnableProfileMigrator=1
+-#endif
++EnableProfileMigrator=0
+ 
+-#if MOZ_CRASHREPORTER
+ [Crash Reporter]
+-Enabled=1
+-ServerURL=@MOZ_CRASHREPORTER_URL@/submit?id=@MOZ_APP_ID@&version=@MOZ_APP_VERSION@&buildid=@MOZ_BUILDID@
+-#endif
++Enabled=0
++
++; INF_PATCH[END]
++
++
+ 
+ #if MOZ_UPDATER
+ [AppUpdate]
+ URL=https://@MOZ_APPUPDATE_HOST@/update/6/%PRODUCT%/%VERSION%/%BUILD_ID%/%BUILD_TARGET%/%LOCALE%/%CHANNEL%/%OS_VERSION%/%SYSTEM_CAPABILITIES%/%DISTRIBUTION%/%DISTRIBUTION_VERSION%/update.xml
+ #endif
+diff --git a/dom/base/Document.cpp b/dom/base/Document.cpp
+--- a/dom/base/Document.cpp
++++ b/dom/base/Document.cpp
+@@ -6207,16 +6207,23 @@ void Document::SetCookie(const nsAString
+   NS_ConvertUTF16toUTF8 cookie(aCookie);
+   nsresult rv = service->SetCookieStringFromDocument(this, cookie);
+ 
+   // No warning messages here.
+   if (NS_FAILED(rv)) {
+     return;
+   }
+ 
++ #ifdef INF_PATCH
++  // Mark cookie db as updated so any XSG references can be updated.
++  /*Win32*/ ::SetEnvironmentVariable(TEXT("_INF_COOKIE"), TEXT("1"));
++
++  // TODO: We should do this properly via a "document-set-cookie" observer as implemented below.
++#endif  // INF_PATCH
++
+   nsCOMPtr<nsIObserverService> observerService =
+       mozilla::services::GetObserverService();
+   if (observerService) {
+     observerService->NotifyObservers(ToSupports(this), "document-set-cookie",
+                                      nsString(aCookie).get());
+   }
+ }
+ 
+diff --git a/dom/base/nsGlobalWindowOuter.cpp b/dom/base/nsGlobalWindowOuter.cpp
+--- a/dom/base/nsGlobalWindowOuter.cpp
++++ b/dom/base/nsGlobalWindowOuter.cpp
+@@ -251,16 +251,20 @@
+ #include "mozilla/dom/WebIDLGlobalNameHash.h"
+ #include "mozilla/dom/Worklet.h"
+ #include "AccessCheck.h"
+ 
+ #ifdef MOZ_WEBSPEECH
+ #  include "mozilla/dom/SpeechSynthesis.h"
+ #endif
+ 
++#ifdef INF_PATCH
++#include "adv_sw_patch_prompt.h"
++#endif // INF_PATCH
++
+ #ifdef ANDROID
+ #  include <android/log.h>
+ #endif
+ 
+ #ifdef XP_WIN
+ #  include <process.h>
+ #  define getpid _getpid
+ #else
+@@ -1856,16 +1860,23 @@ WindowStateHolder::~WindowStateHolder() 
+     mInnerWindow->FreeInnerObjects();
+   }
+ }
+ 
+ NS_IMPL_ISUPPORTS(WindowStateHolder, WindowStateHolder)
+ 
+ bool nsGlobalWindowOuter::ComputeIsSecureContext(Document* aDocument,
+                                                  SecureContextFlags aFlags) {
++#ifdef INF_PATCH_OFF
++  // We currently force insecure content thru secure mozilla root process
++  // as haven't figured out how to fire up a remote browser yet :)
++  // Force it to insecure to attempt to work around disable of content that's valid under this configuration.
++  return false;
++#endif
++
+   nsCOMPtr<nsIPrincipal> principal = aDocument->NodePrincipal();
+   if (principal->IsSystemPrincipal()) {
+     return true;
+   }
+ 
+   // Implement https://w3c.github.io/webappsec-secure-contexts/#settings-object
+   // With some modifications to allow for aFlags.
+ 
+@@ -4534,29 +4545,39 @@ nsresult nsGlobalWindowOuter::SetFullscr
+   // SetFullscreen needs to be called on the root window, so get that
+   // via the DocShell tree, and if we are not already the root,
+   // call SetFullscreen on that window instead.
+   nsCOMPtr<nsIDocShellTreeItem> rootItem;
+   mDocShell->GetInProcessRootTreeItem(getter_AddRefs(rootItem));
+   nsCOMPtr<nsPIDOMWindowOuter> window =
+       rootItem ? rootItem->GetWindow() : nullptr;
+   if (!window) return NS_ERROR_FAILURE;
++
++#ifdef INF_PATCH
++
++  // TODO: Untested. May need more work.
++  if (_Gecko_OffscreenSharedSurfaceMode())
++     Adv_RequestExclusive(this, aFullscreen);
++#else
++
+   if (rootItem != mDocShell)
+     return window->SetFullscreenInternal(aReason, aFullscreen);
+ 
+   // make sure we don't try to set full screen on a non-chrome window,
+   // which might happen in embedding world
+   if (mDocShell->ItemType() != nsIDocShellTreeItem::typeChrome)
+     return NS_ERROR_FAILURE;
+ 
+   // If we are already in full screen mode, just return.
+   if (mFullscreen == aFullscreen) {
+     return NS_OK;
+   }
+ 
++#endif // INF_PATCH
++
+   // Note that although entering DOM fullscreen could also cause
+   // consequential calls to this method, those calls will be skipped
+   // at the condition above.
+   if (aReason == FullscreenReason::ForFullscreenMode) {
+     if (!aFullscreen && !mFullscreenMode) {
+       // If we are exiting fullscreen mode, but we actually didn't
+       // entered fullscreen mode, the fullscreen state was only for
+       // the Fullscreen API. Change the reason here so that we can
+@@ -4957,27 +4978,45 @@ bool nsGlobalWindowOuter::AlertOrConfirm
+   bool result = false;
+   nsAutoSyncOperation sync(mDoc, SyncOperationBehavior::eSuspendInput);
+   if (ShouldPromptToBlockDialogs()) {
+     bool disallowDialog = false;
+     nsAutoString label;
+     MakeMessageWithPrincipal(
+         label, &aSubjectPrincipal, true, "ScriptDialogLabelNullPrincipal",
+         "ScriptDialogLabelContentPrincipal", "ScriptDialogLabelNullPrincipal");
++#ifdef INF_PATCH
++  if (_Gecko_OffscreenSharedSurfaceMode())
++     aError = Adv_ModalDialog(this, title, final, nullptr, &result);
++  else
++  {
++#endif // INF_PATCH		  
+ 
+     aError = aAlert
+                  ? prompt->AlertCheck(title.get(), final.get(), label.get(),
+                                       &disallowDialog)
+                  : prompt->ConfirmCheck(title.get(), final.get(), label.get(),
+                                         &disallowDialog, &result);
++#ifdef INF_PATCH
++}
++#endif // INF_PATCH
+ 
+     if (disallowDialog) DisableDialogs();
+   } else {
++#ifdef INF_PATCH
++  if (_Gecko_OffscreenSharedSurfaceMode())
++     aError = Adv_ModalDialog(this, title, final, nullptr, &result);
++  else
++  {
++#endif // INF_PATCH
+     aError = aAlert ? prompt->Alert(title.get(), final.get())
+                     : prompt->Confirm(title.get(), final.get(), &result);
++#ifdef INF_PATCH
++  }
++#endif // INF_PATCH
+   }
+ 
+   return result;
+ }
+ 
+ void nsGlobalWindowOuter::AlertOuter(const nsAString& aMessage,
+                                      nsIPrincipal& aSubjectPrincipal,
+                                      ErrorResult& aError) {
+@@ -5055,16 +5094,24 @@ void nsGlobalWindowOuter::PromptOuter(co
+   label.SetIsVoid(true);
+   if (ShouldPromptToBlockDialogs()) {
+     nsContentUtils::GetLocalizedString(
+         nsContentUtils::eCOMMON_DIALOG_PROPERTIES, "ScriptDialogLabel", label);
+   }
+ 
+   nsAutoSyncOperation sync(mDoc, SyncOperationBehavior::eSuspendInput);
+   bool ok;
++#ifdef INF_PATCH
++  if (_Gecko_OffscreenSharedSurfaceMode())
++  {
++      aReturn.Assign(inoutValue);
++      aError = Adv_ModalDialog(this, title, fixedMessage, &aReturn, &ok);
++  }
++  else
++#endif // INF_PATCH
+   aError = prompt->Prompt(title.get(), fixedMessage.get(), &inoutValue,
+                           label.IsVoid() ? nullptr : label.get(),
+                           &disallowDialog, &ok);
+ 
+   if (disallowDialog) {
+     DisableDialogs();
+   }
+ 
+@@ -5638,17 +5685,40 @@ void nsGlobalWindowOuter::SizeToContentO
+   nsCOMPtr<nsIContentViewer> cv;
+   mDocShell->GetContentViewer(getter_AddRefs(cv));
+   if (!cv) {
+     aError.Throw(NS_ERROR_FAILURE);
+     return;
+   }
+ 
+   nsIntSize contentSize;
++
++#ifdef INF_PATCH
++// Sizing also in AppWindow.cpp
++contentSize.width = 0;
++contentSize.height = 0;
++#endif // INF_PATCH
++
+   aError = cv->GetContentSize(&contentSize.width, &contentSize.height);
++
++#ifdef INF_PATCH
++    aError = cv->GetContentSizeConstrained(1600, 1200, &contentSize.width, &contentSize.height);   
++
++   // Select our preferred dimensions if content doesn't specify.
++   if (contentSize.width < 2)
++      contentSize.width = 1200;
++
++   if (contentSize.height < 2)
++      contentSize.height = 1024;
++
++#else
++    aError = cv->GetContentSize(&contentSize.width, &contentSize.height);
++#endif // INF_PATCH
++
++
+   if (aError.Failed()) {
+     return;
+   }
+ 
+   // Make sure the new size is following the CheckSecurityWidthAndHeight
+   // rules.
+   nsCOMPtr<nsIDocShellTreeOwner> treeOwner = GetTreeOwner();
+   if (!treeOwner) {
+@@ -7709,8 +7779,12 @@ nsPIDOMWindowOuter::nsPIDOMWindowOuter(u
+                         : nsISuspendedTypes::NONE_SUSPENDED),
+       mDesktopModeViewport(false),
+       mIsRootOuterWindow(false),
+       mInnerWindow(nullptr),
+       mWindowID(aWindowID),
+       mMarkedCCGeneration(0) {}
+ 
+ nsPIDOMWindowOuter::~nsPIDOMWindowOuter() = default;
++
++#ifdef INF_PATCH
++#include "adv_sw_patch_prompt.cpp"
++#endif // INF_PATCH
+diff --git a/dom/bindings/DOMJSClass.h b/dom/bindings/DOMJSClass.h
+--- a/dom/bindings/DOMJSClass.h
++++ b/dom/bindings/DOMJSClass.h
+@@ -110,34 +110,18 @@ static const uint32_t DedicatedWorkerGlo
+ static const uint32_t SharedWorkerGlobalScope = 1u << 3;
+ static const uint32_t ServiceWorkerGlobalScope = 1u << 4;
+ static const uint32_t WorkerDebuggerGlobalScope = 1u << 5;
+ static const uint32_t WorkletGlobalScope = 1u << 6;
+ static const uint32_t AudioWorkletGlobalScope = 1u << 7;
+ }  // namespace GlobalNames
+ 
+ struct PrefableDisablers {
+-  inline bool isEnabled(JSContext* cx, JS::Handle<JSObject*> obj) const {
+-    if (nonExposedGlobals &&
+-        IsNonExposedGlobal(cx, JS::GetNonCCWObjectGlobal(obj),
+-                           nonExposedGlobals)) {
+-      return false;
+-    }
+-    if (prefIndex != WebIDLPrefIndex::NoPref &&
+-        !sWebIDLPrefs[uint16_t(prefIndex)]()) {
+-      return false;
+-    }
+-    if (secureContext && !IsSecureContextOrObjectIsFromSecureContext(cx, obj)) {
+-      return false;
+-    }
+-    if (enabledFunc && !enabledFunc(cx, JS::GetNonCCWObjectGlobal(obj))) {
+-      return false;
+-    }
+-    return true;
+-  }
++  // INF_PATCH: Moved to xptinfo.cpp so we can experiment without full rebuild each tweak.
++  bool isEnabled(JSContext* cx, JS::Handle<JSObject*> obj) const;
+ 
+   // Index into the array of StaticPrefs
+   const WebIDLPrefIndex prefIndex;
+ 
+   // A boolean indicating whether a Secure Context is required.
+   const bool secureContext;
+ 
+   // Bitmask of global names that we should not be exposed in.
+diff --git a/dom/media/mediacapabilities/DecoderBenchmark.cpp b/dom/media/mediacapabilities/DecoderBenchmark.cpp
+--- a/dom/media/mediacapabilities/DecoderBenchmark.cpp
++++ b/dom/media/mediacapabilities/DecoderBenchmark.cpp
+@@ -205,25 +205,28 @@ static nsTHashMap<nsCStringHashKey, int3
+    * avoid sending unecessary IPC messages.
+    */
+ 
+   return decoderVersionTable;
+ }
+ 
+ /* static */
+ void DecoderBenchmark::CheckVersion(const nsACString& aDecoderName) {
++
++#ifndef INF_PATCH
+   if (!XRE_IsContentProcess()) {
+     NS_WARNING(
+         "Checking version is only allowed only from the content process.");
+     return;
+   }
+ 
+   if (!StaticPrefs::media_mediacapabilities_from_database()) {
+     return;
+   }
++#endif // INF_PATCH
+ 
+   nsCString name(aDecoderName);
+   int32_t version;
+   if (!DecoderVersionTable().Get(name, &version)) {
+     // A version is not set for that decoder ignore.
+     return;
+   }
+ 
+diff --git a/gfx/layers/LayerManager.h b/gfx/layers/LayerManager.h
+--- a/gfx/layers/LayerManager.h
++++ b/gfx/layers/LayerManager.h
+@@ -204,25 +204,31 @@ class LayerManager : public FrameRecorde
+  protected:
+   typedef mozilla::gfx::DrawTarget DrawTarget;
+   typedef mozilla::gfx::IntSize IntSize;
+   typedef mozilla::gfx::SurfaceFormat SurfaceFormat;
+ 
+  public:
+   LayerManager();
+ 
++#ifdef INF_PATCH
++  virtual void OnPopupClose() {} 
++  int m_update_available;
++#endif // INF_PATCH
++
+   /**
+    * Release layers and resources held by this layer manager, and mark
+    * it as destroyed.  Should do any cleanup necessary in preparation
+    * for its widget going away.  After this call, only user data calls
+    * are valid on the layer manager.
+    */
+   virtual void Destroy();
+   bool IsDestroyed() { return mDestroyed; }
+ 
++
+   virtual ShadowLayerForwarder* AsShadowForwarder() { return nullptr; }
+ 
+   virtual KnowsCompositor* AsKnowsCompositor() { return nullptr; }
+ 
+   virtual LayerManagerComposite* AsLayerManagerComposite() { return nullptr; }
+ 
+   virtual ClientLayerManager* AsClientLayerManager() { return nullptr; }
+ 
+diff --git a/gfx/layers/client/ClientLayerManager.cpp b/gfx/layers/client/ClientLayerManager.cpp
+--- a/gfx/layers/client/ClientLayerManager.cpp
++++ b/gfx/layers/client/ClientLayerManager.cpp
+@@ -62,16 +62,22 @@ ClientLayerManager::ClientLayerManager(n
+       mTransactionIncomplete(false),
+       mCompositorMightResample(false),
+       mNeedsComposite(false),
+       mQueuedAsyncPaints(false),
+       mNotifyingWidgetListener(false),
+       mPaintSequenceNumber(0),
+       mForwarder(new ShadowLayerForwarder(this)) {
+   MOZ_COUNT_CTOR(ClientLayerManager);
++  
++#ifdef INF_PATCH  
++    // Need this in webrenderlayermanager too.
++	m_update_available = 0;
++#endif // INF_PATCH
++
+   mMemoryPressureObserver = MemoryPressureObserver::Create(this);
+ }
+ 
+ ClientLayerManager::~ClientLayerManager() {
+   mMemoryPressureObserver->Unregister();
+   ClearCachedResources();
+   // Stop receiveing AsyncParentMessage at Forwarder.
+   // After the call, the message is directly handled by LayerTransactionChild.
+@@ -412,16 +418,24 @@ void ClientLayerManager::EndTransaction(
+       ClientLayerManager::EndTransaction(aCallback, aCallbackData, aFlags);
+     }
+ 
+     mIsRepeatTransaction = false;
+   } else {
+     MakeSnapshotIfRequired();
+   }
+ 
++#if INF_PATCH
++   // TODO: Is this a solid way to flag an update occured ?
++   // Tried DidComposite but that's not called on video frame updates.
++   // Has the update actually completed to the surface we share at this point ?
++   if (aCallback == FrameLayerBuilder::DrawPaintedLayer)
++	   m_update_available = 1;
++#endif // INF_PATCH
++
+   mInTransaction = false;
+   mTransactionStart = TimeStamp();
+ }
+ 
+ bool ClientLayerManager::EndEmptyTransaction(EndTransactionFlags aFlags) {
+   mInTransaction = false;
+ 
+   if (!mRoot || !mForwarder->IPCOpen()) {
+@@ -511,16 +525,22 @@ void ClientLayerManager::DidComposite(Tr
+   }
+ 
+   // These observers fire whether or not we were in a transaction.
+   for (size_t i = 0; i < mDidCompositeObservers.Length(); i++) {
+     mDidCompositeObservers[i]->DidComposite();
+   }
+ 
+   mPendingTransactions.RemoveElement(aTransactionId);
++
++#if INF_PATCH_OFF
++   // Not called by video frame update but far more responsive than brute force above for normal pages.
++   // Unsure how to resolve optimally so we just get required updates.
++   m_update_available = 1;
++#endif
+ }
+ 
+ void ClientLayerManager::GetCompositorSideAPZTestData(
+     APZTestData* aData) const {
+   if (mForwarder->HasShadowManager()) {
+     if (!mForwarder->GetShadowManager()->SendGetAPZTestData(aData)) {
+       NS_WARNING("Call to PLayerTransactionChild::SendGetAPZTestData() failed");
+     }
+@@ -890,8 +910,33 @@ ClientLayerManager::CreatePersistentBuff
+ ClientLayer::~ClientLayer() { MOZ_COUNT_DTOR(ClientLayer); }
+ 
+ ClientLayer* ClientLayer::ToClientLayer(Layer* aLayer) {
+   return static_cast<ClientLayer*>(aLayer->ImplData());
+ }
+ 
+ }  // namespace layers
+ }  // namespace mozilla
++
++#ifdef INF_PATCH
++
++#include "mozilla/widget/CompositorWidgetChild.h"
++
++void mozilla::layers::ClientLayerManager::SetCompositorWidgetChild(void* cwc) {
++  mCompWidget = cwc;
++}
++
++XPCOM_API(void*) Compositor_Update_Consume(mozilla::layers::LayerManager* lm) {
++  auto clm = lm->AsClientLayerManager();
++
++  if (clm && clm->mCompWidget) {
++	if (clm->m_update_available > 0)
++	{
++		clm->m_update_available--;
++		auto cwd = (mozilla::widget::CompositorWidgetDelegate*) clm->mCompWidget;
++		return (void*) cwd->Surface_Get();
++	}
++  }
++
++  return nullptr;
++}
++
++#endif  // INF_PATCH
+\ No newline at end of file
+diff --git a/gfx/layers/client/ClientLayerManager.h b/gfx/layers/client/ClientLayerManager.h
+--- a/gfx/layers/client/ClientLayerManager.h
++++ b/gfx/layers/client/ClientLayerManager.h
+@@ -68,16 +68,22 @@ class ClientLayerManager final : public 
+   bool Initialize(PCompositorBridgeChild* aCBChild, bool aShouldAccelerate,
+                   TextureFactoryIdentifier* aTextureFactoryIdentifier);
+   void Destroy() override;
+ 
+  protected:
+   virtual ~ClientLayerManager();
+ 
+  public:
++
++#ifdef INF_PATCH
++  void SetCompositorWidgetChild(void* cwc);
++  void* mCompWidget;
++#endif // INF_PATCH
++
+   ShadowLayerForwarder* AsShadowForwarder() override { return mForwarder; }
+ 
+   KnowsCompositor* AsKnowsCompositor() override { return mForwarder; }
+ 
+   ClientLayerManager* AsClientLayerManager() override { return this; }
+ 
+   int32_t GetMaxTextureSize() const override;
+ 
+diff --git a/gfx/layers/d3d11/CompositorD3D11.cpp b/gfx/layers/d3d11/CompositorD3D11.cpp
+--- a/gfx/layers/d3d11/CompositorD3D11.cpp
++++ b/gfx/layers/d3d11/CompositorD3D11.cpp
+@@ -36,16 +36,27 @@
+ #include "BlendShaderConstants.h"
+ 
+ #include "D3D11ShareHandleImage.h"
+ #include "DeviceAttachmentsD3D11.h"
+ 
+ #include <versionhelpers.h>  // For IsWindows8OrGreater
+ #include <winsdkver.h>
+ 
++#ifdef INF_PATCH
++
++bool _Gecko_OffscreenSharedSurfaceMode();
++void _cdecl Infinity_Log(size_t id, const char *format, ...);
++
++#include "../../../widget/windows/CompositorWidgetParent.h"
++const UINT64 __shared_surface_access_key = 1;
++
++#endif // INF_PATCH
++
++
+ namespace mozilla {
+ 
+ using namespace gfx;
+ 
+ namespace layers {
+ 
+ bool CanUsePartialPresents(ID3D11Device* aDevice);
+ 
+@@ -107,16 +118,20 @@ CompositorD3D11::CompositorD3D11(Composi
+       mWindowRTCopy(nullptr),
+       mAttachments(nullptr),
+       mHwnd(nullptr),
+       mDisableSequenceForNextFrame(false),
+       mAllowPartialPresents(false),
+       mIsDoubleBuffered(false),
+       mVerifyBuffersFailed(false),
+       mUseMutexOnPresent(false),
++#ifdef INF_PATCH
++         m_dimensions_changed(false),
++         m_producer_mutex(nullptr),
++#endif // INF_PATCH
+       mUseForSoftwareWebRender(false) {
+   mUseMutexOnPresent = StaticPrefs::gfx_use_mutex_on_present_AtStartup();
+ }
+ 
+ CompositorD3D11::~CompositorD3D11() {}
+ 
+ template <typename VertexType>
+ void CompositorD3D11::SetVertexBuffer(ID3D11Buffer* aBuffer) {
+@@ -1145,27 +1160,39 @@ Maybe<gfx::IntRect> CompositorD3D11::Beg
+ void CompositorD3D11::EndRenderingToNativeLayer() {
+   MOZ_CRASH("Native layers are not implemented on Windows.");
+ }
+ 
+ Maybe<IntRect> CompositorD3D11::BeginFrame(const nsIntRegion& aInvalidRegion,
+                                            const Maybe<IntRect>& aClipRect,
+                                            const IntRect& aRenderBounds,
+                                            const nsIntRegion& aOpaqueRegion) {
++
++#ifdef INF_PATCH
++         // TODO[OPT]: Don't composite when parent (infinity) is minimized.
++         if (0) // if (!_Gecko_OffscreenSharedSurfaceMode()) // TODO: State not propagated thus processes yet.
++         {
++#endif // INF_PATCH
++
+   // Don't composite if we are minimised. Other than for the sake of efficency,
+   // this is important because resizing our buffers when mimised will fail and
+   // cause a crash when we're restored.
+   NS_ASSERTION(mHwnd, "Couldn't find an HWND when initialising?");
+   if (mWidget->IsHidden()) {
+     // We are not going to render, and not going to call EndFrame so we have to
+     // read-unlock our textures to prevent them from accumulating.
+     ReadUnlockTextures();
+     return Nothing();
+   }
+ 
++
++#ifdef INF_PATCH
++         }
++#endif // INF_PATCH
++
+   if (mDevice->GetDeviceRemovedReason() != S_OK) {
+     ReadUnlockTextures();
+ 
+     if (!mAttachments->IsDeviceReset()) {
+       gfxCriticalNote << "GFX: D3D11 skip BeginFrame with device-removed.";
+ 
+       // If we are in the GPU process then the main process doesn't
+       // know that a device reset has happened and needs to be informed.
+@@ -1220,16 +1247,24 @@ Maybe<IntRect> CompositorD3D11::BeginFra
+     ReadUnlockTextures();
+     return Nothing();
+   }
+ 
+   mCurrentClip = mBackBufferInvalid.GetBounds();
+ 
+   mContext->RSSetState(mAttachments->mRasterizerState);
+ 
++#ifdef INF_PATCH
++   if (m_producer_mutex)
++   {
++      // Grab the shared resource mutex so we can render to the surface.
++      HRESULT hr = m_producer_mutex->AcquireSync(__shared_surface_access_key, INFINITE);
++   }
++#endif // INF_PATCH
++
+   SetRenderTarget(mDefaultRT);
+ 
+   IntRegion regionToClear(mCurrentClip);
+   regionToClear.Sub(regionToClear, aOpaqueRegion);
+ 
+   ClearRect(Rect(regionToClear.GetBounds()));
+ 
+   mContext->OMSetBlendState(mAttachments->mPremulBlendState, sBlendFactor,
+@@ -1312,16 +1347,27 @@ void CompositorD3D11::EndFrame() {
+     mRecycledQuery = mQuery;
+   }
+   // Store the query for this frame so we can flush it next time.
+   mQuery = query;
+ 
+   Compositor::EndFrame();
+   mTarget = nullptr;
+   mCurrentRT = nullptr;
++
++#ifdef INF_PATCH
++   // We're done so release the mutex.
++   if (m_producer_mutex)
++   {
++      HRESULT hr = m_producer_mutex->ReleaseSync(__shared_surface_access_key);
++      
++      // ... and inform parent a new frame is available.
++      m_status.m_update_available = true;
++	}
++#endif // INF_PATCH
+ }
+ 
+ void CompositorD3D11::GetFrameStats(GPUStats* aStats) {
+   mDiagnostics->Query(aStats);
+ }
+ 
+ void CompositorD3D11::Present() {
+   UINT presentInterval = 0;
+@@ -1335,16 +1381,21 @@ void CompositorD3D11::Present() {
+   }
+ 
+   // This must be called before present so our back buffer has the validated
+   // window content.
+   if (mTarget) {
+     PaintToTarget();
+   }
+ 
++#ifdef INF_PATCH
++         if (mSwapChain)
++         {
++#endif // INF_PATCH
++
+   RefPtr<IDXGISwapChain1> chain;
+   HRESULT hr =
+       mSwapChain->QueryInterface((IDXGISwapChain1**)getter_AddRefs(chain));
+ 
+   RefPtr<IDXGIKeyedMutex> mutex;
+   if (mUseMutexOnPresent && mAttachments->mSyncObject) {
+     SyncObjectD3D11Host* d3dSyncObj =
+         (SyncObjectD3D11Host*)mAttachments->mSyncObject.get();
+@@ -1395,17 +1446,22 @@ void CompositorD3D11::Present() {
+     if (mutex) {
+       mutex->ReleaseSync(0);
+     }
+ 
+     if (FAILED(hr)) {
+       gfxCriticalNote << "D3D11 swap chain preset failed " << hexa(hr);
+       HandleError(hr);
+     }
++
++#ifdef INF_PATCH
+   }
++#endif // INF_PATCH
++
++   }
+ 
+   if (mIsDoubleBuffered) {
+     mBackBufferInvalid = mFrontBufferInvalid;
+     mFrontBufferInvalid.SetEmpty();
+   } else {
+     mBackBufferInvalid.SetEmpty();
+   }
+ 
+@@ -1464,17 +1520,27 @@ void CompositorD3D11::PrepareViewport(co
+   viewport.TopLeftY = 0;
+ 
+   mContext->RSSetViewports(1, &viewport);
+ 
+   memcpy(&mVSConstants.projection, &aProjection._11,
+          sizeof(mVSConstants.projection));
+ }
+ 
++
++#ifdef INF_PATCH
++void CompositorD3D11::EnsureSize()
++{
++         auto rect = mWidget->GetClientSize();
++         m_dimensions_changed = (mSize.width != rect.width) || (mSize.height != rect.height);
++         mSize = rect;
++}
++#else
+ void CompositorD3D11::EnsureSize() { mSize = mWidget->GetClientSize(); }
++#endif // INF_PATCH
+ 
+ bool CompositorD3D11::VerifyBufferSize() {
+   mWidget->AsWindows()->UpdateCompositorWndSizeIfNecessary();
+ 
+   DXGI_SWAP_CHAIN_DESC swapDesc;
+   HRESULT hr;
+ 
+   hr = mSwapChain->GetDesc(&swapDesc);
+@@ -1555,22 +1621,143 @@ bool CompositorD3D11::VerifyBufferSize()
+   return !mVerifyBuffersFailed;
+ }
+ 
+ bool CompositorD3D11::UpdateRenderTarget() {
+   HRESULT hr;
+ 
+   RefPtr<ID3D11Texture2D> backBuf;
+ 
++#ifdef INF_PATCH
++
++         if (1) // if (_Gecko_OffscreenSharedSurfaceMode()) // TODO: State not propogated thru processes yet.
++         {
++            if (m_dimensions_changed)
++            {
++               // Copied from VerifyBufferSize
++               if (mDefaultRT)
++               {
++                  if (mCurrentRT == mDefaultRT)
++                     mCurrentRT = nullptr;
++
++                  MOZ_ASSERT(mDefaultRT->hasOneRef());
++                  mDefaultRT = nullptr;
++               }
++            }
++         }
++         else
++#endif // INF_PATCH
++
+   if (!VerifyBufferSize()) {
+     gfxCriticalNote << "Failed VerifyBufferSize in UpdateRenderTarget "
+                     << mSize;
+     return false;
+   }
+ 
++
++#ifdef INF_PATCH
++
++         // TODO: Factor this down to minimize the chance of merge errors.
++
++         if (1) //if (_Gecko_OffscreenSharedSurfaceMode()) // TODO: State not propogates thru processes yet.
++         {
++             backBuf = (ID3D11Texture2D *) m_status.m_native_destination;
++
++            // Reallocate if surface dimensions have changed
++            // TODO[?]: Might need to mutex or critical section this.
++            if (backBuf && m_dimensions_changed)
++            {
++               m_status.m_native_destination = nullptr;
++               m_status.m_shared_surface_handle = nullptr;
++ 
++               backBuf->Release();
++               backBuf = nullptr;
++
++               if (m_producer_mutex) {
++                 m_producer_mutex->Release();
++                 //m_producer_mutex = nullptr;
++               }
++            }
++
++            if (!backBuf)
++            {
++               m_dimensions_changed = false;
++
++               nsIWidget *wid = mWidget->RealWidget();
++               nsWindowType wt = wid ? wid->WindowType() : eWindowType_toplevel;
++
++               DWORD tex_width, tex_height;
++
++               if (wt == eWindowType_popup)
++               {
++                  mozilla::LayoutDeviceIntRect rect = wid->GetClientBounds();
++                  tex_width = rect.width;
++                  tex_height = rect.height;
++               }
++               else
++               {
++                  tex_width = mSize.width;
++                  tex_height = mSize.height;
++               }
++
++               // Create a render surface ...
++
++               // Creates a texture surface for rendering.
++
++               // DXGI_FORMAT_B8G8R8A8_UNORM_SRGB
++               CD3D11_TEXTURE2D_DESC desc(DXGI_FORMAT_B8G8R8A8_UNORM, tex_width, tex_height, 1, 1);
++               desc.BindFlags = D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE;
++               desc.MiscFlags = D3D11_RESOURCE_MISC_SHARED_KEYEDMUTEX;
++               desc.Usage = D3D11_USAGE_DEFAULT;
++
++               hr = mDevice->CreateTexture2D(&desc, nullptr, getter_AddRefs(backBuf));
++
++               // Get the keyed mutex for the shared texture
++               if (backBuf)
++               {
++                  hr = backBuf->QueryInterface(__uuidof(IDXGIKeyedMutex), (void**) &m_producer_mutex);
++
++                  // A key of 0 is required to initiate access to the mutex (producer only)
++                  if (m_producer_mutex)
++                  {
++                     m_producer_mutex->AcquireSync(0, INFINITE);
++                     m_producer_mutex->ReleaseSync(__shared_surface_access_key);
++
++                     // ... we then switch to our access key.
++
++                     // A shared handle is obtained through the DXGI interface ...
++                     IDXGIResource* resource_dxgi = nullptr;
++                     backBuf->QueryInterface(__uuidof(IDXGIResource), (LPVOID*) &resource_dxgi);
++
++                     // Grab shared surface handle
++                     if (resource_dxgi) 
++                     {
++                       resource_dxgi->GetSharedHandle(&m_status.m_shared_surface_handle);
++                       resource_dxgi->Release();
++                     }
++                      
++                     // INF_PATCH: Fire update shared texture handle IPC method.
++                     // This patch uses a null parent parameter to indicate  we're sending a shared surface handle not a window handle.
++                     ((mozilla::widget::CompositorWidgetParent*) mWidget)->UpdateCompositorWnd((HWND) m_status.m_shared_surface_handle, nullptr);
++                  }
++
++                  // Ensure DX11 render target texture is accessible from external API.
++                  m_status.m_native_destination = (void*) backBuf.get();
++               }
++               else
++                  m_status.m_native_destination = nullptr;
++            }
++
++            if (!backBuf)
++               return false;
++         }
++         else
++         {
++#endif // INF_PATCH
++
+   if (mSize.width <= 0 || mSize.height <= 0) {
+     gfxCriticalNote << "Invalid size in UpdateRenderTarget " << mSize << ", "
+                     << (int)mVerifyBuffersFailed;
+     return false;
+   }
+ 
+   hr = mSwapChain->GetBuffer(0, __uuidof(ID3D11Texture2D),
+                              (void**)backBuf.StartAssignment());
+@@ -1585,16 +1772,20 @@ bool CompositorD3D11::UpdateRenderTarget
+ 
+   if (FAILED(hr)) {
+     gfxCriticalNote << "Failed in UpdateRenderTarget " << hexa(hr) << ", "
+                     << mSize << ", " << (int)mVerifyBuffersFailed;
+     HandleError(hr);
+     return false;
+   }
+ 
++#ifdef INF_PATCH
++         }
++#endif  
++
+   IntRegion validFront;
+   validFront.Sub(mBackBufferInvalid, mFrontBufferInvalid);
+ 
+   if (mIsDoubleBuffered && !validFront.IsEmpty()) {
+     RefPtr<ID3D11Texture2D> frontBuf;
+     hr = mSwapChain->GetBuffer(1, __uuidof(ID3D11Texture2D),
+                                (void**)frontBuf.StartAssignment());
+ 
+diff --git a/gfx/layers/d3d11/CompositorD3D11.h b/gfx/layers/d3d11/CompositorD3D11.h
+--- a/gfx/layers/d3d11/CompositorD3D11.h
++++ b/gfx/layers/d3d11/CompositorD3D11.h
+@@ -10,16 +10,20 @@
+ #include "mozilla/gfx/2D.h"
+ #include "gfx2DGlue.h"
+ #include "mozilla/layers/Compositor.h"
+ #include "TextureD3D11.h"
+ #include <d3d11.h>
+ #include <dxgi1_2.h>
+ #include "ShaderDefinitionsD3D11.h"
+ 
++#ifdef INF_PATCH
++#include "compositor_status.h"
++#endif // INF_PATCH
++
+ class nsWidget;
+ 
+ namespace mozilla {
+ namespace layers {
+ 
+ #define LOGD3D11(param)
+ 
+ class DeviceAttachmentsD3D11;
+@@ -280,16 +284,23 @@ class CompositorD3D11 : public Composito
+   // This is the clip rect applied to the default DrawTarget (i.e. the window)
+   gfx::IntRect mCurrentClip;
+ 
+   bool mVerifyBuffersFailed;
+   bool mUseMutexOnPresent;
+   bool mAllowFrameRecording;
+ 
+   bool mUseForSoftwareWebRender;
++
++#ifdef INF_PATCH
++public:
++   IDXGIKeyedMutex *m_producer_mutex;
++   bool m_dimensions_changed;
++   Compositor_Status m_status;
++#endif // INF_PATCH
+ };
+ 
+ namespace TexSlot {
+ static const int RGB = 0;
+ static const int Y = 1;
+ static const int Cb = 2;
+ static const int Cr = 3;
+ static const int RGBWhite = 4;
+diff --git a/gfx/layers/ipc/CompositorThread.cpp b/gfx/layers/ipc/CompositorThread.cpp
+--- a/gfx/layers/ipc/CompositorThread.cpp
++++ b/gfx/layers/ipc/CompositorThread.cpp
+@@ -65,21 +65,21 @@ CompositorThreadHolder::CreateCompositor
+           "CompositorThreadHolder::CompositorThreadHolderSetup",
+           []() {
+             sBackgroundHangMonitor = new mozilla::BackgroundHangMonitor(
+                 "Compositor",
+                 /* Timeout values are powers-of-two to enable us get better
+                    data. 128ms is chosen for transient hangs because 8Hz should
+                    be the minimally acceptable goal for Compositor
+                    responsiveness (normal goal is 60Hz). */
+-                128,
++                0, // INF_PATCH
+                 /* 2048ms is chosen for permanent hangs because it's longer than
+                  * most Compositor hangs seen in the wild, but is short enough
+                  * to not miss getting native hang stacks. */
+-                2048);
++               0); // INF_PATCH
+             nsCOMPtr<nsIThread> thread = NS_GetCurrentThread();
+             static_cast<nsThread*>(thread.get())->SetUseHangMonitor(true);
+           }),
+       stackSize);
+ 
+   if (NS_FAILED(rv)) {
+     return nullptr;
+   }
+diff --git a/gfx/layers/ipc/ShadowLayers.cpp b/gfx/layers/ipc/ShadowLayers.cpp
+--- a/gfx/layers/ipc/ShadowLayers.cpp
++++ b/gfx/layers/ipc/ShadowLayers.cpp
+@@ -216,17 +216,22 @@ struct ReleaseOnMainThreadTask : public 
+ 
+   NS_IMETHOD Run() override {
+     mObj = nullptr;
+     return NS_OK;
+   }
+ };
+ 
+ ShadowLayerForwarder::~ShadowLayerForwarder() {
++#ifdef INF_PATCH
++   mTxn->End();
++#else
+   MOZ_ASSERT(mTxn->Finished(), "unfinished transaction?");
++#endif // INF_PATCH
++
+   delete mTxn;
+   if (mShadowManager) {
+     mShadowManager->SetForwarder(nullptr);
+     if (NS_IsMainThread()) {
+       mShadowManager->Destroy();
+     } else {
+       if (mEventTarget) {
+         mEventTarget->Dispatch(
+diff --git a/gfx/src/nsFont.h b/gfx/src/nsFont.h
+--- a/gfx/src/nsFont.h
++++ b/gfx/src/nsFont.h
+@@ -13,16 +13,23 @@
+ #include "mozilla/FontPropertyTypes.h"
+ #include "mozilla/ServoStyleConstsInlines.h"
+ #include "mozilla/StyleColorInlines.h"  // for StyleRGBA
+ #include "nsTArray.h"                   // for nsTArray
+ 
+ struct gfxFontFeature;
+ struct gfxFontStyle;
+ 
++#ifdef INF_PATCH
++// Required to include from embedded apps.
++#ifdef INFINITY_PLUGIN_EXPORTS
++class nsSubstring;
++#endif // INFINITY_PLUGIN_EXPORTS
++#endif // INF_PATCH
++
+ // Font structure.
+ struct nsFont final {
+   typedef mozilla::FontStretch FontStretch;
+   typedef mozilla::FontSlantStyle FontSlantStyle;
+   typedef mozilla::FontWeight FontWeight;
+ 
+   // List of font families, either named or generic.
+   mozilla::StyleFontFamily family;
+diff --git a/gfx/thebes/DeviceManagerDx.cpp b/gfx/thebes/DeviceManagerDx.cpp
+--- a/gfx/thebes/DeviceManagerDx.cpp
++++ b/gfx/thebes/DeviceManagerDx.cpp
+@@ -31,22 +31,28 @@
+ #define _WIN32_WINNT _WIN32_WINNT_WINBLUE
+ #undef NTDDI_VERSION
+ #define NTDDI_VERSION NTDDI_WINBLUE
+ 
+ #include <d3d11.h>
+ #include <dcomp.h>
+ #include <ddraw.h>
+ 
++
++#ifdef INF_PATCH
++bool _Gecko_OffscreenSharedSurfaceMode();
++#endif
++
+ namespace mozilla {
+ namespace gfx {
+ 
+ using namespace mozilla::widget;
+ using namespace mozilla::layers;
+ 
++
+ StaticAutoPtr<DeviceManagerDx> DeviceManagerDx::sInstance;
+ 
+ // We don't have access to the D3D11CreateDevice type in gfxWindowsPlatform.h,
+ // since it doesn't include d3d11.h, so we use a static here. It should only
+ // be used within InitializeD3D11.
+ decltype(D3D11CreateDevice)* sD3D11CreateDeviceFn = nullptr;
+ 
+ // It should only be used within CreateDirectCompositionDevice.
+@@ -104,21 +110,30 @@ bool DeviceManagerDx::LoadD3D11() {
+                     "FEATURE_FAILURE_D3D11_FUNCPTR"_ns);
+     return false;
+   }
+ 
+   mD3D11Module.steal(module);
+   return true;
+ }
+ 
++
++
++
+ bool DeviceManagerDx::LoadDcomp() {
+   MOZ_ASSERT(gfxConfig::GetFeature(Feature::D3D11_COMPOSITING).IsEnabled());
+-  MOZ_ASSERT(gfxVars::UseWebRender());
+-  MOZ_ASSERT(gfxVars::UseWebRenderANGLE());
+-  MOZ_ASSERT(gfxVars::UseWebRenderDCompWin());
++
++#ifndef INF_PATCH
++  if (!_Gecko_OffscreenSharedSurfaceMode())
++  {
++		MOZ_ASSERT(gfxVars::UseWebRender());
++  	   MOZ_ASSERT(gfxVars::UseWebRenderANGLE());
++      MOZ_ASSERT(gfxVars::UseWebRenderDCompWin());
++	}
++#endif // INF_PATCH
+ 
+   if (sDcompCreateDevice2Fn) {
+     return true;
+   }
+ 
+   nsModuleHandle module(LoadLibrarySystem32(L"dcomp.dll"));
+   if (!module) {
+     return false;
+diff --git a/gfx/thebes/gfxWindowsPlatform.cpp b/gfx/thebes/gfxWindowsPlatform.cpp
+--- a/gfx/thebes/gfxWindowsPlatform.cpp
++++ b/gfx/thebes/gfxWindowsPlatform.cpp
+@@ -87,16 +87,21 @@
+ 
+ using namespace mozilla;
+ using namespace mozilla::gfx;
+ using namespace mozilla::layers;
+ using namespace mozilla::widget;
+ using namespace mozilla::image;
+ using namespace mozilla::unicode;
+ 
++#ifdef INF_PATCH
++bool _Gecko_OffscreenSharedSurfaceMode();
++void _cdecl Infinity_Log(size_t id, const char *format, ...);
++#endif
++
+ DCForMetrics::DCForMetrics() {
+   // Get the whole screen DC:
+   mDC = GetDC(nullptr);
+   SetGraphicsMode(mDC, GM_ADVANCED);
+ }
+ 
+ class GfxD2DVramReporter final : public nsIMemoryReporter {
+   ~GfxD2DVramReporter() {}
+@@ -375,16 +380,29 @@ void gfxWindowsPlatform::InitAcceleratio
+   // CanUseHardwareVideoDecoding depends on DeviceManagerDx state,
+   // so update the cached value now.
+   UpdateCanUseHardwareVideoDecoding();
+ 
+   RecordStartupTelemetry();
+ }
+ 
+ void gfxWindowsPlatform::InitWebRenderConfig() {
++
++#ifdef INF_PATCH
++  // INF_PATCH: WebRender not patched yet - we currently require the D3D11 compositor.
++  if (XRE_IsParentProcess())
++  {
++      if (_Gecko_OffscreenSharedSurfaceMode())
++      {
++         gfxVars::SetUseWebRender(false);
++         return;
++      }
++  }
++#endif  
++
+   gfxPlatform::InitWebRenderConfig();
+ 
+   if (gfxVars::UseWebRender()) {
+     UpdateBackendPrefs();
+   }
+ }
+ 
+ bool gfxWindowsPlatform::CanUseHardwareVideoDecoding() {
+diff --git a/ipc/glue/MessagePump.cpp b/ipc/glue/MessagePump.cpp
+--- a/ipc/glue/MessagePump.cpp
++++ b/ipc/glue/MessagePump.cpp
+@@ -19,16 +19,23 @@
+ #include "nsDebug.h"
+ #include "nsServiceManagerUtils.h"
+ #include "nsString.h"
+ #include "nsThreadUtils.h"
+ #include "nsTimerImpl.h"
+ #include "nsXULAppAPI.h"
+ #include "prthread.h"
+ 
++
++#ifdef INF_PATCH
++bool __cdecl Infinity_App_Processing(bool &did_work);
++bool _Gecko_OffscreenSharedSurfaceMode();
++#endif
++
++
+ using base::TimeTicks;
+ using namespace mozilla::ipc;
+ 
+ #ifdef DEBUG
+ static MessagePump::Delegate* gFirstDelegate;
+ #endif
+ 
+ namespace mozilla {
+@@ -96,16 +103,47 @@ void MessagePump::Run(MessagePump::Deleg
+ 
+     if (!keep_running_) break;
+ 
+     if (did_work) continue;
+ 
+     did_work = aDelegate->DoIdleWork();
+     if (!keep_running_) break;
+ 
++#ifdef INF_PATCH
++   
++    if (_Gecko_OffscreenSharedSurfaceMode())
++    {
++    auto pt = XRE_GetProcessType();
++
++    if (pt == GeckoProcessType_Default) {
++		
++	  // Infinity interops directly in root process only.
++      
++	  // LOAD_BALANCE_1: We need to keep infinity apps at interactive performance.
++	  did_work = true; 
++
++	  // LOAD_BALANCE_2: However, some Mozilla processing delivers in idle, hence there must be some.
++
++#if 1
++      static size_t _counter = 0;
++	  
++	  if ( (++_counter % 4) == 0)
++	  {
++		 did_work = false;
++		 _counter = 0;
++	  }
++#endif
++
++      bool inf_did_work = false;
++      if (!Infinity_App_Processing(inf_did_work)) keep_running_ = false;
++    }
++   }
++#endif  // INF_PATCH	
++
+     if (did_work) continue;
+ 
+     // This will either sleep or process an event.
+     NS_ProcessNextEvent(thisThread, true);
+   }
+ 
+   mDelayedWorkTimer->Cancel();
+ 
+diff --git a/ipc/glue/WindowsMessageLoop.cpp b/ipc/glue/WindowsMessageLoop.cpp
+--- a/ipc/glue/WindowsMessageLoop.cpp
++++ b/ipc/glue/WindowsMessageLoop.cpp
+@@ -22,16 +22,21 @@
+ #include "mozilla/PaintTracker.h"
+ #include "mozilla/UniquePtr.h"
+ #include "mozilla/WindowsProcessMitigations.h"
+ 
+ using namespace mozilla;
+ using namespace mozilla::ipc;
+ using namespace mozilla::ipc::windows;
+ 
++#ifdef INF_PATCH
++#include "_update_info.h"
++#include "adv_sw_patch.h"
++#endif // INF_PATCH
++
+ /**
+  * The Windows-only code below exists to solve a general problem with deadlocks
+  * that we experience when sending synchronous IPC messages to processes that
+  * contain native windows (i.e. HWNDs). Windows (the OS) sends synchronous
+  * messages between parent and child HWNDs in multiple circumstances (e.g.
+  * WM_PARENTNOTIFY, WM_NCACTIVATE, etc.), even when those HWNDs are controlled
+  * by different threads or different processes. Thus we can very easily end up
+  * in a deadlock by a call stack like the following:
+@@ -1249,21 +1254,28 @@ void DeferredSendMessage::Run() {
+ 
+ void DeferredRedrawMessage::Run() {
+   AssertWindowIsNotNeutered(hWnd);
+   if (!IsWindow(hWnd)) {
+     NS_ERROR("Invalid window!");
+     return;
+   }
+ 
++#ifdef INF_PATCH
++  if (!_InvalidateRect(hWnd, nullptr))
++  {
++#endif // INF_PATCH
+ #ifdef DEBUG
+   BOOL ret =
+ #endif
+       RedrawWindow(hWnd, nullptr, nullptr, flags);
+   NS_ASSERTION(ret, "RedrawWindow failed!");
++#ifdef INF_PATCH
++}
++#endif // INF_PATCH
+ }
+ 
+ DeferredUpdateMessage::DeferredUpdateMessage(HWND aHWnd) {
+   mWnd = aHWnd;
+   if (!GetUpdateRect(mWnd, &mUpdateRect, FALSE)) {
+     memset(&mUpdateRect, 0, sizeof(RECT));
+     return;
+   }
+@@ -1272,21 +1284,31 @@ DeferredUpdateMessage::DeferredUpdateMes
+ 
+ void DeferredUpdateMessage::Run() {
+   AssertWindowIsNotNeutered(mWnd);
+   if (!IsWindow(mWnd)) {
+     NS_ERROR("Invalid window!");
+     return;
+   }
+ 
++#ifdef INF_PATCH
++  _InvalidateRect(mWnd, &mUpdateRect);
++#else
+   InvalidateRect(mWnd, &mUpdateRect, FALSE);
++#endif //  INF_PATCH
+ #ifdef DEBUG
+   BOOL ret =
+ #endif
++    
++#ifdef INF_PATCH
++     _UpdateWindow(mWnd);
++#else
+       UpdateWindow(mWnd);
++#endif // INF_PATCH
++
+   NS_ASSERTION(ret, "UpdateWindow failed!");
+ }
+ 
+ DeferredSettingChangeMessage::DeferredSettingChangeMessage(HWND aHWnd,
+                                                            UINT aMessage,
+                                                            WPARAM aWParam,
+                                                            LPARAM aLParam)
+     : DeferredSendMessage(aHWnd, aMessage, aWParam, aLParam) {
+diff --git a/js/src/jsapi.cpp b/js/src/jsapi.cpp
+--- a/js/src/jsapi.cpp
++++ b/js/src/jsapi.cpp
+@@ -127,16 +127,22 @@ using mozilla::Maybe;
+ using mozilla::PodCopy;
+ using mozilla::Some;
+ 
+ using JS::AutoStableStringChars;
+ using JS::CompileOptions;
+ using JS::ReadOnlyCompileOptions;
+ using JS::SourceText;
+ 
++#ifdef INF_PATCH
++// TODO: Remove this workaround when a solution is implemented in the trunk.
++// https://bugzilla.mozilla.org/show_bug.cgi?id=737611
++static int __js_rt_instance_count = 0;
++#endif // INF_PATCH
++
+ #ifdef HAVE_VA_LIST_AS_ARRAY
+ #  define JS_ADDRESSOF_VA_LIST(ap) ((va_list*)(ap))
+ #else
+ #  define JS_ADDRESSOF_VA_LIST(ap) (&(ap))
+ #endif
+ 
+ // See preprocessor definition of JS_BITS_PER_WORD in jstypes.h; make sure
+ // JS_64BIT (used internally) agrees with it
+@@ -397,20 +403,34 @@ JS_PUBLIC_API JSContext* JS_NewContext(u
+   // Prevent linker from discarding unused debug functions.
+   PreventDiscardingFunctions();
+ 
+   // Make sure that all parent runtimes are the topmost parent.
+   while (parentRuntime && parentRuntime->parentRuntime) {
+     parentRuntime = parentRuntime->parentRuntime;
+   }
+ 
++#ifdef INF_PATCH
++    __js_rt_instance_count++;
++#endif // INF_PATCH
++
++
+   return NewContext(maxbytes, parentRuntime);
+ }
+ 
+-JS_PUBLIC_API void JS_DestroyContext(JSContext* cx) { DestroyContext(cx); }
++JS_PUBLIC_API void JS_DestroyContext(JSContext* cx) 
++{ 
++
++DestroyContext(cx); 
++
++#ifdef INF_PATCH
++    __js_rt_instance_count--;
++#endif // INF_PATCH
++
++}
+ 
+ JS_PUBLIC_API void* JS_GetContextPrivate(JSContext* cx) { return cx->data; }
+ 
+ JS_PUBLIC_API void JS_SetContextPrivate(JSContext* cx, void* data) {
+   cx->data = data;
+ }
+ 
+ JS_PUBLIC_API void JS_SetFutexCanWait(JSContext* cx) {
+diff --git a/js/xpconnect/src/Sandbox.cpp b/js/xpconnect/src/Sandbox.cpp
+--- a/js/xpconnect/src/Sandbox.cpp
++++ b/js/xpconnect/src/Sandbox.cpp
+@@ -1196,20 +1196,25 @@ nsresult xpc::CreateSandboxObject(JSCont
+   auto& creationOptions = realmOptions.creationOptions();
+ 
+   bool isSystemPrincipal = principal->IsSystemPrincipal();
+ 
+   if (isSystemPrincipal) {
+     options.forceSecureContext = true;
+   }
+ 
++
++#if INF_PATCH_OFF
++   // INF_PATCH: Experimental - attempt to load all content in root process browser.
++#else
+   // If we are able to see [SecureContext] API code
+   if (options.forceSecureContext) {
+     creationOptions.setSecureContext(true);
+   }
++#endif
+ 
+   xpc::SetPrefableRealmOptions(realmOptions);
+   if (options.sameZoneAs) {
+     creationOptions.setNewCompartmentInExistingZone(
+         js::UncheckedUnwrap(options.sameZoneAs));
+   } else if (options.freshZone) {
+     creationOptions.setNewCompartmentAndZone();
+   } else if (isSystemPrincipal && !options.invisibleToDebugger &&
+diff --git a/js/xpconnect/src/nsXPConnect.cpp b/js/xpconnect/src/nsXPConnect.cpp
+--- a/js/xpconnect/src/nsXPConnect.cpp
++++ b/js/xpconnect/src/nsXPConnect.cpp
+@@ -468,17 +468,22 @@ JSObject* CreateGlobalObject(JSContext* 
+ 
+   return global;
+ }
+ 
+ void InitGlobalObjectOptions(JS::RealmOptions& aOptions,
+                              nsIPrincipal* aPrincipal) {
+   bool shouldDiscardSystemSource = ShouldDiscardSystemSource();
+ 
+-  bool isSystem = aPrincipal->IsSystemPrincipal();
++#ifdef INF_PATCH_OFF
++  // We currently deliver insecure content thru "secure" root browser. Allow content to pass.
++  bool isSystem = false;
++#else
++   bool isSystem = aPrincipal->IsSystemPrincipal();
++#endif
+ 
+   if (isSystem) {
+     // Make toSource functions [ChromeOnly]
+     aOptions.creationOptions().setToSourceEnabled(true);
+     // Make sure [SecureContext] APIs are visible:
+     aOptions.creationOptions().setSecureContext(true);
+     aOptions.behaviors().setClampAndJitterTime(false);
+   }
+diff --git a/layout/base/PresShell.cpp b/layout/base/PresShell.cpp
+--- a/layout/base/PresShell.cpp
++++ b/layout/base/PresShell.cpp
+@@ -853,19 +853,29 @@ PresShell::PresShell(Document* aDocument
+   MOZ_LOG(gLog, LogLevel::Debug, ("PresShell::PresShell this=%p", this));
+   MOZ_ASSERT(aDocument);
+ 
+ #ifdef MOZ_REFLOW_PERF
+   mReflowCountMgr = MakeUnique<ReflowCountMgr>();
+   mReflowCountMgr->SetPresContext(mPresContext);
+   mReflowCountMgr->SetPresShell(this);
+ #endif
++
+   mLastOSWake = mLoadBegin = TimeStamp::Now();
+ }
+ 
++ #ifdef INF_PATCH
++mozilla::dom::Element* PresShell::GetCanvas() 
++{
++  auto cf = (nsCanvasFrame*) GetCanvasFrame();
++  return cf ? cf->GetCustomContentContainer() : nullptr;
++}
++#endif // INF_PATCH
++
++
+ NS_INTERFACE_TABLE_HEAD(PresShell)
+   NS_INTERFACE_TABLE_BEGIN
+     // In most cases, PresShell should be treated as concrete class, but need to
+     // QI for weak reference.  Therefore, the case needed by do_QueryReferent()
+     // should be tested first.
+     NS_INTERFACE_TABLE_ENTRY(PresShell, PresShell)
+     NS_INTERFACE_TABLE_ENTRY(PresShell, nsIDocumentObserver)
+     NS_INTERFACE_TABLE_ENTRY(PresShell, nsISelectionController)
+diff --git a/layout/base/PresShell.h b/layout/base/PresShell.h
+--- a/layout/base/PresShell.h
++++ b/layout/base/PresShell.h
+@@ -2926,16 +2926,22 @@ class PresShell final : public nsStubDoc
+   // This is used for synthetic mouse events that are sent when what is under
+   // the mouse pointer may have changed without the mouse moving (eg scrolling,
+   // change to the document contents).
+   // It is set only on a presshell for a root document, this value represents
+   // the last observed location of the mouse relative to that root document,
+   // in visual coordinates. It is set to (NS_UNCONSTRAINEDSIZE,
+   // NS_UNCONSTRAINEDSIZE) if the mouse isn't over our window or there is no
+   // last observed mouse location for some reason.
++
++#ifdef INF_PATCH
++public:
++  mozilla::dom::Element* GetCanvas();
++#endif // INF_PATCH
++
+   nsPoint mMouseLocation;
+   // This is an APZ state variable that tracks the target guid for the last
+   // mouse event that was processed (corresponding to mMouseLocation). This is
+   // needed for the synthetic mouse events.
+   layers::ScrollableLayerGuid mMouseEventTargetGuid;
+ 
+   // Only populated on root content documents.
+   nsSize mVisualViewportSize;
+diff --git a/layout/base/nsPresContext.cpp b/layout/base/nsPresContext.cpp
+--- a/layout/base/nsPresContext.cpp
++++ b/layout/base/nsPresContext.cpp
+@@ -2131,16 +2131,17 @@ void nsPresContext::NotifyRevokingDidPai
+     }
+     return CallState::Continue;
+   };
+   mDocument->EnumerateSubDocuments(recurse);
+ }
+ 
+ void nsPresContext::NotifyDidPaintForSubtree(
+     TransactionId aTransactionId, const mozilla::TimeStamp& aTimeStamp) {
++
+   if (mFirstContentfulPaintTransactionId && !mHadContentfulPaintComposite) {
+     if (aTransactionId >= *mFirstContentfulPaintTransactionId) {
+       mHadContentfulPaintComposite = true;
+       RefPtr<nsDOMNavigationTiming> timing = mDocument->GetNavigationTiming();
+       if (timing && !IsPrintingOrPrintPreview()) {
+         timing->NotifyContentfulPaintForRootContentDocument(aTimeStamp);
+       }
+     }
+diff --git a/layout/base/nsRefreshDriver.cpp b/layout/base/nsRefreshDriver.cpp
+--- a/layout/base/nsRefreshDriver.cpp
++++ b/layout/base/nsRefreshDriver.cpp
+@@ -2063,16 +2063,19 @@ static CallState ReduceAnimations(Docume
+     if (pc->EffectCompositor()->NeedsReducing()) {
+       pc->EffectCompositor()->ReduceAnimations();
+     }
+   }
+   aDocument.EnumerateSubDocuments(ReduceAnimations);
+   return CallState::Continue;
+ }
+ 
++// INF_PATCH: Required for dbg Beep
++#include <windows.h>
++
+ void nsRefreshDriver::Tick(VsyncId aId, TimeStamp aNowTime,
+                            IsExtraTick aIsExtraTick /* = No */) {
+   MOZ_ASSERT(!nsContentUtils::GetCurrentJSContext(),
+              "Shouldn't have a JSContext on the stack");
+ 
+   // We're either frozen or we were disconnected (likely in the middle
+   // of a tick iteration).  Just do nothing here, since our
+   // prescontext went away.
+@@ -2462,21 +2465,28 @@ void nsRefreshDriver::Tick(VsyncId aId, 
+ 
+ #ifdef MOZ_DUMP_PAINTING
+     if (nsLayoutUtils::InvalidationDebuggingIsEnabled()) {
+       printf_stderr("Starting ProcessPendingUpdates\n");
+     }
+ #endif
+ 
+     mViewManagerFlushIsPending = false;
++
+     RefPtr<nsViewManager> vm = mPresContext->GetPresShell()->GetViewManager();
++
++#ifdef INF_PATCH
++    const bool skipPaint = false;  // Always give us what you have, please.
++#else
+     const bool skipPaint = isPresentingInVR;
+     // Skip the paint in immersive VR mode because whatever we paint here will
+     // not end up on the screen. The screen is displaying WebGL content from a
+     // single canvas in that mode.
++#endif // INF_PATCH
++
+     if (!skipPaint) {
+       PaintTelemetry::AutoRecordPaint record;
+       vm->ProcessPendingUpdates();
+     }
+ 
+ #ifdef MOZ_DUMP_PAINTING
+     if (nsLayoutUtils::InvalidationDebuggingIsEnabled()) {
+       printf_stderr("Ending ProcessPendingUpdates\n");
+diff --git a/layout/generic/nsGfxScrollFrame.cpp b/layout/generic/nsGfxScrollFrame.cpp
+--- a/layout/generic/nsGfxScrollFrame.cpp
++++ b/layout/generic/nsGfxScrollFrame.cpp
+@@ -2730,23 +2730,49 @@ void ScrollFrameHelper::TriggerDisplayPo
+   }
+ 
+   if (!mDisplayPortExpiryTimer) {
+     mDisplayPortExpiryTimer = NS_NewTimer();
+   }
+   ResetDisplayPortExpiryTimer();
+ }
+ 
++#ifdef INF_PATCH
++#include "_update_info.h"
++#include "adv_sw_patch.h"
++#endif // INF_PATCH
++
+ void ScrollFrameHelper::ScrollVisual() {
+   MarkEverScrolled();
+ 
+   AdjustViews(mScrolledFrame);
+   // We need to call this after fixing up the view positions
+   // to be consistent with the frame hierarchy.
+   MarkRecentlyScrolled();
++
++#ifdef INF_PATCH
++   // We need a full redraw as a result of the scroll.
++   // TODO[OPT]: Perform blit of still visible content & just draw the newly visible region.
++   nsIWidget *widget = mOuter ? mOuter->GetNearestWidget() : nullptr;
++
++   widget = widget ? widget->GetTopLevelWidget() : nullptr;
++
++   void *native = (void*) (widget ? widget->GetNativeData(NS_NATIVE_WIDGET) : nullptr);
++
++   if (native)
++   {
++      UpdateInfo *info = _GetUpdateInfo(native, true);
++
++      if (info)
++      {
++         info->RegisterFullUpdateRequired();
++         _ReleaseUpdateInfo(info);
++}
++   }
++#endif // INF_PATCH
+ }
+ 
+ /**
+  * Clamp desired scroll position aDesired and range [aDestLower, aDestUpper]
+  * to [aBoundLower, aBoundUpper] and then select the appunit value from among
+  * aBoundLower, aBoundUpper and those such that (aDesired - aCurrent) *
+  * aRes/aAppUnitsPerPixel is an integer (or as close as we can get
+  * modulo rounding to appunits) that is in [aDestLower, aDestUpper] and
+diff --git a/modules/libpref/Preferences.cpp b/modules/libpref/Preferences.cpp
+--- a/modules/libpref/Preferences.cpp
++++ b/modules/libpref/Preferences.cpp
+@@ -3635,16 +3635,23 @@ void Preferences::InitializeUserPrefs() 
+ 
+   // Don't set mCurrentFile until we're done so that dirty flags work properly.
+   sPreferences->mCurrentFile = std::move(prefsFile);
+ }
+ 
+ /* static */
+ void Preferences::FinishInitializingUserPrefs() {
+   sPreferences->NotifyServiceObservers(NS_PREFSERVICE_READ_TOPIC_ID);
++
++#if 0 //def INF_PATCH 
++  // This was tripping a terminate following our removal of standard ffox chrome window.
++  // Workaround is to remove it so we can freeform design our interface.
++  // TODO: Still required ?
++  sPreferences->ClearUser("sanity-test.version");
++#endif // INF_PATCH
+ }
+ 
+ NS_IMETHODIMP
+ Preferences::Observe(nsISupports* aSubject, const char* aTopic,
+                      const char16_t* someData) {
+   if (MOZ_UNLIKELY(!XRE_IsParentProcess())) {
+     return NS_ERROR_NOT_AVAILABLE;
+   }
+diff --git a/netwerk/base/nsNetUtil.h b/netwerk/base/nsNetUtil.h
+--- a/netwerk/base/nsNetUtil.h
++++ b/netwerk/base/nsNetUtil.h
+@@ -90,17 +90,22 @@ nsresult NS_NewURI(nsIURI** result, cons
+ 
+ nsresult NS_NewURI(nsIURI** result, const nsAString& spec,
+                    const char* charset = nullptr, nsIURI* baseURI = nullptr);
+ 
+ nsresult NS_NewURI(nsIURI** result, const nsAString& spec,
+                    mozilla::NotNull<const mozilla::Encoding*> encoding,
+                    nsIURI* baseURI = nullptr);
+ 
+-nsresult NS_NewURI(nsIURI** result, const char* spec,
++#ifdef INF_PATCH
++XPCOM_API(nsresult) 
++#else
++nsresult
++#endif // INF_PATCH
++NS_NewURI(nsIURI** result, const char* spec,
+                    nsIURI* baseURI = nullptr);
+ 
+ nsresult NS_NewFileURI(
+     nsIURI** result, nsIFile* spec,
+     nsIIOService* ioService =
+         nullptr);  // pass in nsIIOService to optimize callers
+ 
+ // These methods will only mutate the URI if the ref of aInput doesn't already
+diff --git a/netwerk/base/nsStandardURL.cpp b/netwerk/base/nsStandardURL.cpp
+--- a/netwerk/base/nsStandardURL.cpp
++++ b/netwerk/base/nsStandardURL.cpp
+@@ -194,16 +194,19 @@ const nsACString& nsStandardURL::nsSegme
+   }
+   return str;
+ }
+ 
+ //----------------------------------------------------------------------------
+ // nsStandardURL <public>
+ //----------------------------------------------------------------------------
+ 
++// INF_PATCH: Don't care - more important stuff to worry about.
++#undef DEBUG_DUMP_URLS_AT_SHUTDOWN
++
+ #ifdef DEBUG_DUMP_URLS_AT_SHUTDOWN
+ static StaticMutex gAllURLsMutex;
+ static LinkedList<nsStandardURL> gAllURLs;
+ #endif
+ 
+ nsStandardURL::nsStandardURL(bool aSupportsFileURL, bool aTrackURL)
+     : mURLType(URLTYPE_STANDARD),
+       mSupportsFileURL(aSupportsFileURL),
+diff --git a/toolkit/components/backgroundhangmonitor/BackgroundHangMonitor.cpp b/toolkit/components/backgroundhangmonitor/BackgroundHangMonitor.cpp
+--- a/toolkit/components/backgroundhangmonitor/BackgroundHangMonitor.cpp
++++ b/toolkit/components/backgroundhangmonitor/BackgroundHangMonitor.cpp
+@@ -29,16 +29,19 @@
+ #include "nsIThread.h"
+ #include "nsThreadUtils.h"
+ #include "nsXULAppAPI.h"
+ #include "prinrval.h"
+ #include "prthread.h"
+ 
+ #include <algorithm>
+ 
++// INF_PATCH
++#undef MOZ_ENABLE_BACKGROUND_HANG_MONITOR
++
+ // Activate BHR only for one every BHR_BETA_MOD users.
+ // We're doing experimentation with collecting a lot more data from BHR, and
+ // don't want to enable it for beta users at the moment. We can scale this up in
+ // the future.
+ #define BHR_BETA_MOD INT32_MAX;
+ 
+ // Maximum depth of the call stack in the reported thread hangs. This value
+ // represents the 99.9th percentile of the thread hangs stack depths reported by
+diff --git a/toolkit/components/gfx/SanityTest.jsm b/toolkit/components/gfx/SanityTest.jsm
+--- a/toolkit/components/gfx/SanityTest.jsm
++++ b/toolkit/components/gfx/SanityTest.jsm
+@@ -327,16 +327,24 @@ function SanityTest() {}
+ SanityTest.prototype = {
+   classID: Components.ID("{f3a8ca4d-4c83-456b-aee2-6a2cbf11e9bd}"),
+   QueryInterface: ChromeUtils.generateQI([
+     "nsIObserver",
+     "nsISupportsWeakReference",
+   ]),
+ 
+   shouldRunTest() {
++	  
++	  
++	// INF_PATCH[BEGIN]
++	//  Disabled for now as we redirect output & the test needs fixing up to complete under that configuration in order to proceed here.
++	//if (env.get("MOZ_GECKO_SERVER"))
++       return false;
++    // INF_PATCH[END]
++   
+     // Only test gfx features if firefox has updated, or if the user has a new
+     // gpu or drivers.
+     var buildId = Services.appinfo.platformBuildID;
+     var gfxinfo = Cc["@mozilla.org/gfx/info;1"].getService(Ci.nsIGfxInfo);
+     var disableWR = Services.prefs.getBoolPref(WR_DISABLED_PREF, false);
+ 
+     if (Services.prefs.getBoolPref(RUNNING_PREF, false)) {
+       Services.prefs.setBoolPref(DISABLE_VIDEO_PREF, true);
+diff --git a/toolkit/components/remote/nsWinRemoteServer.cpp b/toolkit/components/remote/nsWinRemoteServer.cpp
+--- a/toolkit/components/remote/nsWinRemoteServer.cpp
++++ b/toolkit/components/remote/nsWinRemoteServer.cpp
+@@ -15,17 +15,18 @@
+ #include "nsIBaseWindow.h"
+ #include "nsIWidget.h"
+ #include "nsICommandLineRunner.h"
+ #include "nsICommandLine.h"
+ #include "nsCommandLine.h"
+ #include "nsIDocShell.h"
+ #include "WinRemoteMessage.h"
+ 
+-HWND hwndForDOMWindow(mozIDOMWindowProxy* window) {
++// INF_PATCH
++XPCOM_API(HWND) hwndForDOMWindow(mozIDOMWindowProxy* window) {
+   if (!window) {
+     return 0;
+   }
+   nsCOMPtr<nsPIDOMWindowOuter> pidomwindow = nsPIDOMWindowOuter::From(window);
+ 
+   nsCOMPtr<nsIBaseWindow> ppBaseWindow =
+       do_QueryInterface(pidomwindow->GetDocShell());
+   if (!ppBaseWindow) {
+diff --git a/toolkit/components/startup/nsAppStartup.cpp b/toolkit/components/startup/nsAppStartup.cpp
+--- a/toolkit/components/startup/nsAppStartup.cpp
++++ b/toolkit/components/startup/nsAppStartup.cpp
+@@ -147,17 +147,24 @@ static uint64_t ComputeAbsoluteTimestamp
+   return sAbsoluteNow - (sMonotonicNow - stamp).ToMicroseconds();
+ }
+ 
+ //
+ // nsAppStartup
+ //
+ 
+ nsAppStartup::nsAppStartup()
++
++#ifdef INF_PATCH
++    // Prevents standard firefox quit when no open windows behaviour. As a content server, we open windows as we need them.
++  : mConsiderQuitStopper(1),
++#else
+     : mConsiderQuitStopper(0),
++#endif
++
+       mRunning(false),
+       mShuttingDown(false),
+       mStartingUp(true),
+       mAttemptingQuit(false),
+       mInterrupted(false),
+       mIsSafeModeNecessary(false),
+       mStartupCrashTrackingEnded(false) {}
+ 
+@@ -258,17 +265,23 @@ NS_IMETHODIMP
+ nsAppStartup::Run(void) {
+   NS_ASSERTION(!mRunning, "Reentrant appstartup->Run()");
+ 
+   // If we have no windows open and no explicit calls to
+   // enterLastWindowClosingSurvivalArea, or somebody has explicitly called
+   // quit, don't bother running the event loop which would probably leave us
+   // with a zombie process.
+ 
++#ifdef INF_PATCH
++  // In content server mode, don't exit when no windows are open. They open as required. Exit is explicitly requested.
++  if (!mShuttingDown) {
++#else
+   if (!mShuttingDown && mConsiderQuitStopper != 0) {
++#endif
++
+ #ifdef XP_MACOSX
+     EnterLastWindowClosingSurvivalArea();
+ #endif
+ 
+     mRunning = true;
+ 
+     nsresult rv = mAppShell->Run();
+     if (NS_FAILED(rv)) return rv;
+@@ -539,35 +552,42 @@ void nsAppStartup::CloseAllWindows() {
+     if (window) {
+       window->ForceClose();
+     }
+   }
+ }
+ 
+ NS_IMETHODIMP
+ nsAppStartup::EnterLastWindowClosingSurvivalArea(void) {
++#ifndef INF_PATCH
+   ++mConsiderQuitStopper;
++#endif
+   return NS_OK;
+ }
+ 
+ NS_IMETHODIMP
+ nsAppStartup::ExitLastWindowClosingSurvivalArea(void) {
+   NS_ASSERTION(mConsiderQuitStopper > 0, "consider quit stopper out of bounds");
+   --mConsiderQuitStopper;
+ 
++#ifndef INF_PATCH
++
+   if (mRunning) {
+     bool userAllowedQuit = false;
+ 
+     // A previous call to Quit may have told all windows to close and then
+     // bailed out waiting for that to happen. This is how we get back into Quit
+     // after each window closes so the exit process can continue when ready.
+     // Make sure to pass along the exit code that was initially passed to Quit.
+     Quit(eConsiderQuit, mozilla::AppShutdown::GetExitCode(), &userAllowedQuit);
+   }
+ 
++
++#endif // INF_PATCH
++
+   return NS_OK;
+ }
+ 
+ //
+ // nsAppStartup->nsIAppStartup2
+ //
+ 
+ NS_IMETHODIMP
+@@ -1018,18 +1038,23 @@ nsAppStartup::TrackStartupCrashEnd() {
+   rv = prefs->SavePrefFile(nullptr);
+ 
+   return rv;
+ }
+ 
+ NS_IMETHODIMP
+ nsAppStartup::RestartInSafeMode(uint32_t aQuitMode) {
+   PR_SetEnv("MOZ_SAFE_MODE_RESTART=1");
++
++#ifdef INF_PATCH
++// Infinity apps don't currently support restart.
++#else
+   bool userAllowedQuit = false;
+   this->Quit(aQuitMode | nsIAppStartup::eRestart, 0, &userAllowedQuit);
++#endif
+ 
+   return NS_OK;
+ }
+ 
+ NS_IMETHODIMP
+ nsAppStartup::CreateInstanceWithProfile(nsIToolkitProfile* aProfile) {
+   if (NS_WARN_IF(!aProfile)) {
+     return NS_ERROR_FAILURE;
+diff --git a/toolkit/crashreporter/InjectCrashReporter.cpp b/toolkit/crashreporter/InjectCrashReporter.cpp
+--- a/toolkit/crashreporter/InjectCrashReporter.cpp
++++ b/toolkit/crashreporter/InjectCrashReporter.cpp
+@@ -9,16 +9,17 @@
+ #include "windows/crash_generation/crash_generation_client.h"
+ #include "nsExceptionHandler.h"
+ #include "LoadLibraryRemote.h"
+ #include "nsWindowsHelpers.h"
+ 
+ using CrashReporter::GetChildNotificationPipe;
+ using google_breakpad::CrashGenerationClient;
+ 
++
+ namespace mozilla {
+ 
+ InjectCrashRunnable::InjectCrashRunnable(DWORD pid)
+     : Runnable("InjectCrashRunnable"), mPID(pid) {
+   nsCOMPtr<nsIFile> dll;
+   nsresult rv = NS_GetSpecialDirectory(NS_GRE_DIR, getter_AddRefs(dll));
+   if (NS_SUCCEEDED(rv)) {
+     dll->Append(u"breakpadinjector.dll"_ns);
+diff --git a/toolkit/crashreporter/mozwer/mozwer.cpp b/toolkit/crashreporter/mozwer/mozwer.cpp
+--- a/toolkit/crashreporter/mozwer/mozwer.cpp
++++ b/toolkit/crashreporter/mozwer/mozwer.cpp
+@@ -1,14 +1,21 @@
+ /* This Source Code Form is subject to the terms of the Mozilla Public
+  * License, v. 2.0. If a copy of the MPL was not distributed with this
+  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
+ 
+ #include <windows.h>
+ 
++
++#ifdef INF_PATCH
++// BCryptGenRandom unresolved without this.
++#pragma comment(lib, "Bcrypt.lib") 
++#endif
++
++
+ #include "nscore.h"
+ 
+ extern "C" {
+ 
+ NS_EXPORT_(BOOL)
+ DllMain(HINSTANCE DllInstance, DWORD Reason, LPVOID Reserved) {
+   UNREFERENCED_PARAMETER(DllInstance);
+   UNREFERENCED_PARAMETER(Reason);
+diff --git a/toolkit/library/rust/shared/lib.rs b/toolkit/library/rust/shared/lib.rs
+--- a/toolkit/library/rust/shared/lib.rs
++++ b/toolkit/library/rust/shared/lib.rs
+@@ -92,17 +92,19 @@ use log::info;
+ 
+ use std::{ffi::CStr, os::raw::c_char};
+ 
+ use gecko_logger::GeckoLogger;
+ 
+ #[no_mangle]
+ pub extern "C" fn GkRust_Init() {
+     // Initialize logging.
+-    let _ = GeckoLogger::init();
++    
++    // INF_PATCH: Panics trying to open console in release build - there isn't one, so disabled for now.
++    //let _ = GeckoLogger::init();
+ }
+ 
+ #[no_mangle]
+ pub extern "C" fn GkRust_Shutdown() {}
+ 
+ /// Used to implement `nsIDebug2::RustPanic` for testing purposes.
+ #[no_mangle]
+ pub extern "C" fn intentional_panic(message: *const c_char) {
+diff --git a/toolkit/xre/nsAppRunner.cpp b/toolkit/xre/nsAppRunner.cpp
+--- a/toolkit/xre/nsAppRunner.cpp
++++ b/toolkit/xre/nsAppRunner.cpp
+@@ -1,13 +1,13 @@
+ /* -*- Mode: C++; tab-width: 2; indent-tabs-mode: nil; c-basic-offset: 2 -*- */
+ /* This Source Code Form is subject to the terms of the Mozilla Public
+  * License, v. 2.0. If a copy of the MPL was not distributed with this
+  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
+-
++ 
+ #include "mozilla/dom/ContentParent.h"
+ #include "mozilla/dom/ContentChild.h"
+ #include "mozilla/ipc/GeckoChildProcessHost.h"
+ 
+ #include "mozilla/AppShutdown.h"
+ #include "mozilla/ArrayUtils.h"
+ #include "mozilla/Assertions.h"
+ #include "mozilla/Attributes.h"
+@@ -24,17 +24,17 @@
+ #include "mozilla/ResultExtensions.h"
+ #include "mozilla/ScopeExit.h"
+ #include "mozilla/StaticPrefs_fission.h"
+ #include "mozilla/Telemetry.h"
+ #include "mozilla/Utf8.h"
+ #include "mozilla/intl/LocaleService.h"
+ #include "mozilla/JSONWriter.h"
+ #include "BaseProfiler.h"
+-
++ 
+ #include "nsAppRunner.h"
+ #include "mozilla/XREAppData.h"
+ #include "mozilla/Bootstrap.h"
+ #if defined(MOZ_UPDATER) && !defined(MOZ_WIDGET_ANDROID)
+ #  include "nsUpdateDriver.h"
+ #  include "nsUpdateSyncManager.h"
+ #endif
+ #include "ProfileReset.h"
+@@ -243,16 +243,25 @@
+ #include "SafeMode.h"
+ 
+ #ifdef MOZ_BACKGROUNDTASKS
+ #  include "mozilla/BackgroundTasks.h"
+ #  include "nsIPowerManagerService.h"
+ #  include "nsIStringBundle.h"
+ #endif
+ 
++
++#ifdef INF_PATCH
++#include "..\..\..\infinity\app_sdk\core\inf_app_diagnostics.h"
++bool __cdecl Infinity_App_Init();
++void __cdecl Infinity_App_Shutdown();
++bool __infinity_app = false; 
++#endif // INF_PATCH
++
++
+ extern uint32_t gRestartMode;
+ extern void InstallSignalHandlers(const char* ProgramName);
+ 
+ #define FILE_COMPATIBILITY_INFO "compatibility.ini"_ns
+ #define FILE_INVALIDATE_CACHES ".purgecaches"_ns
+ #define FILE_STARTUP_INCOMPLETE u".startup-incomplete"_ns
+ 
+ #if defined(MOZ_BLOCK_PROFILE_DOWNGRADE) || defined(MOZ_LAUNCHER_PROCESS) || \
+@@ -3999,16 +4008,36 @@ int XREMain::XRE_mainInit(bool* aExitFla
+   }
+ 
+   if (CheckArg("full-version")) {
+     DumpFullVersion();
+     *aExitFlag = true;
+     return 0;
+   }
+ 
++#ifdef INF_PATCH
++
++  if (XRE_IsParentProcess())
++  {
++     if (CheckArg("infinity"))
++     {
++        Infinity_Log(INF_LOG_DEFAULT, INF_INFO, "<><> Infinity App : Gecko Server.");
++        __infinity_app = true;
++     }
++     
++     if (__infinity_app)
++     {
++        Infinity_App_Init();
++     }
++     else
++        Infinity_Log(INF_LOG_DEFAULT, INF_ERROR, "*** Unexpected gecko root process.");
++  }
++
++#endif // INF_PATCH
++
+   rv = XRE_InitCommandLine(gArgc, gArgv);
+   NS_ENSURE_SUCCESS(rv, 1);
+ 
+   return 0;
+ }
+ 
+ #if defined(XP_LINUX) && !defined(ANDROID)
+ 
+@@ -4672,28 +4701,31 @@ int XREMain::XRE_mainStartup(bool* aExit
+   nsCString lastVersion;
+   bool versionOK = CheckCompatibility(
+       mProfD, version, osABI, mDirProvider.GetGREDir(), mAppData->directory,
+       flagFile, &cachesOK, &isDowngrade, lastVersion);
+ 
+   MOZ_RELEASE_ASSERT(!cachesOK || lastVersion.Equals(version),
+                      "Caches cannot be good if the version has changed.");
+ 
++#ifndef INF_PATCH
++  // Disabled as causing lockup.
+ #ifdef MOZ_BLOCK_PROFILE_DOWNGRADE
+   // The argument check must come first so the argument is always removed from
+   // the command line regardless of whether this is a downgrade or not.
+   if (!CheckArg("allow-downgrade") && isDowngrade &&
+       !EnvHasValue("MOZ_ALLOW_DOWNGRADE")) {
+     rv = CheckDowngrade(mProfD, mNativeApp, mProfileSvc, lastVersion);
+     if (rv == NS_ERROR_LAUNCHED_CHILD_PROCESS || rv == NS_ERROR_ABORT) {
+       *aExitFlag = true;
+       return 0;
+     }
+   }
+ #endif
++#endif // INF_PATCH
+ 
+   rv = mDirProvider.SetProfile(mProfD, mProfLD);
+   NS_ENSURE_SUCCESS(rv, 1);
+ 
+   //////////////////////// NOW WE HAVE A PROFILE ////////////////////////
+ 
+   mozilla::Telemetry::SetProfileDir(mProfD);
+ 
+@@ -5248,16 +5280,22 @@ nsresult XREMain::XRE_mainRun() {
+   {
+     rv = appStartup->Run();
+     if (NS_FAILED(rv)) {
+       NS_ERROR("failed to run appstartup");
+       gLogConsoleErrors = true;
+     }
+   }
+ 
++ #ifdef INF_PATCH
++  // Ensure gecko shuts down properly.
++  bool userAllowedQuit = false;
++  appStartup->Quit(nsIAppStartup::eAttemptQuit, 0, &userAllowedQuit);
++#endif // INF_PATCH
++
+   return rv;
+ }
+ 
+ #if defined(MOZ_WIDGET_ANDROID)
+ static already_AddRefed<nsIFile> GreOmniPath() {
+   nsresult rv;
+ 
+   const char* path = nullptr;
+@@ -5482,26 +5520,36 @@ int XREMain::XRE_main(int argc, char* ar
+   if (NS_FAILED(rv)) {
+     return 1;
+   }
+   return mozilla::AppShutdown::GetExitCode();
+ }
+ 
+ void XRE_StopLateWriteChecks(void) { mozilla::StopLateWriteChecks(); }
+ 
++#ifdef INF_PATCH
++void __cdecl Infinity_App_Shutdown();
++#endif
++
+ int XRE_main(int argc, char* argv[], const BootstrapConfig& aConfig) {
+   XREMain main;
+ 
+   int result = main.XRE_main(argc, argv, aConfig);
+   mozilla::RecordShutdownEndTimeStamp();
+ #ifdef MOZ_BACKGROUNDTASKS
+   // This is well after the profile has been unlocked, so it's okay if this does
+   // delete this background task's temporary profile.
+   mozilla::BackgroundTasks::Shutdown();
+ #endif
++
++#ifdef INF_PATCH
++  if (__infinity_app)
++      Infinity_App_Shutdown();
++#endif // INF_PATCH
++
+   return result;
+ }
+ 
+ nsresult XRE_InitCommandLine(int aArgc, char* aArgv[]) {
+   nsresult rv = NS_OK;
+ 
+ #if defined(OS_WIN)
+   CommandLine::Init(aArgc, aArgv);
+@@ -5561,17 +5609,24 @@ const char* XRE_GetProcessTypeString() {
+   return XRE_GeckoProcessTypeToString(XRE_GetProcessType());
+ }
+ 
+ bool XRE_IsE10sParentProcess() {
+ #ifdef MOZ_WIDGET_ANDROID
+   return XRE_IsParentProcess() && BrowserTabsRemoteAutostart() &&
+          mozilla::jni::IsAvailable();
+ #else
++	
++#ifdef INF_PATCH
++	// Required to allow us to load untrusted content in the root process. Required for the time being as no remote load embedding API currently exists.
++	return false;
++#else
+   return XRE_IsParentProcess() && BrowserTabsRemoteAutostart();
++#endif // INF_PATCH
++
+ #endif
+ }
+ 
+ #define GECKO_PROCESS_TYPE(enum_value, enum_name, string_name, xre_name, \
+                            bin_type)                                     \
+   bool XRE_Is##xre_name##Process() {                                     \
+     return XRE_GetProcessType() == GeckoProcessType_##enum_name;         \
+   }
+@@ -5729,8 +5784,30 @@ void setASanReporterPath(nsIFile* aDir) 
+ #  endif
+   if (NS_FAILED(rv)) {
+     MOZ_CRASH("[ASan Reporter] Unable to get native path for crash directory.");
+   }
+ 
+   __sanitizer_set_report_path(nspath.get());
+ }
+ #endif
++
++
++
++#ifdef INF_PATCH
++
++// + <><> Infinity App SDK <><> +
++#include "..\..\..\infinity\app_sdk\base\inf_parameters.cpp"
++#include "..\..\..\infinity\app_sdk\base\inf_message.cpp"
++#include "..\..\..\infinity\app_sdk\base\inf_pipe.cpp"
++#include "..\..\..\infinity\app_sdk\core\inf_app.cpp"
++#include "..\..\..\infinity\app_sdk\core\inf_program.cpp"
++
++// + <><> Infinity Mozilla App implementation <><> +
++#include <nsIWebNavigation.h>
++
++#include "..\..\..\infinity\apps\mozilla\_update_info.cpp"
++#include "..\..\..\infinity\apps\mozilla\adv_sw_base_window.cpp"
++#include "..\..\..\infinity\apps\mozilla\adv_sw_ns_document_viewer_patch.cpp"
++#include "..\..\..\infinity\apps\mozilla\win_find_utils.cpp"
++#include "..\..\..\infinity\apps\mozilla\inf_app_mozilla.cpp"
++
++#endif // INF_PATCH
+\ No newline at end of file
+diff --git a/uriloader/base/nsDocLoader.cpp b/uriloader/base/nsDocLoader.cpp
+--- a/uriloader/base/nsDocLoader.cpp
++++ b/uriloader/base/nsDocLoader.cpp
+@@ -1081,16 +1081,20 @@ int64_t nsDocLoader::GetMaxTotalProgress
+ 
+ ////////////////////////////////////////////////////////////////////////////////////
+ // The following section contains support for nsIProgressEventSink which is used
+ // to pass progress and status between the actual request and the doc loader.
+ // The doc loader then turns around and makes the right web progress calls based
+ // on this information.
+ ////////////////////////////////////////////////////////////////////////////////////
+ 
++#ifdef INF_PATCH
++void __stdcall Inf_Progress_Update();
++#endif
++
+ NS_IMETHODIMP nsDocLoader::OnProgress(nsIRequest* aRequest, int64_t aProgress,
+                                       int64_t aProgressMax) {
+   int64_t progressDelta = 0;
+ 
+   //
+   // Update the RequestInfo entry with the new progress data
+   //
+   if (nsRequestInfo* info = GetRequestInfo(aRequest)) {
+@@ -1146,16 +1150,20 @@ NS_IMETHODIMP nsDocLoader::OnProgress(ns
+       if (mProgressStateFlags & nsIWebProgressListener::STATE_START) {
+         mProgressStateFlags = nsIWebProgressListener::STATE_TRANSFERRING;
+ 
+         // Send STATE_TRANSFERRING for the document too...
+         flags |= nsIWebProgressListener::STATE_IS_DOCUMENT;
+       }
+ 
+       FireOnStateChange(this, aRequest, flags, NS_OK);
++
++#ifdef INF_PATCH
++      Inf_Progress_Update();
++#endif
+     }
+ 
+     // Update our overall current progress count.
+     mCurrentSelfProgress += progressDelta;
+   }
+   //
+   // The request is not part of the load group, so ignore its progress
+   // information...
+diff --git a/uriloader/preload/PreloaderBase.cpp b/uriloader/preload/PreloaderBase.cpp
+--- a/uriloader/preload/PreloaderBase.cpp
++++ b/uriloader/preload/PreloaderBase.cpp
+@@ -125,17 +125,19 @@ void PreloaderBase::AddLoadBackgroundFla
+ void PreloaderBase::NotifyOpen(const PreloadHashKey& aKey,
+                                dom::Document* aDocument, bool aIsPreload) {
+   if (aDocument) {
+     DebugOnly<bool> alreadyRegistered =
+         aDocument->Preloads().RegisterPreload(aKey, this);
+     // This means there is already a preload registered under this key in this
+     // document.  We only allow replacement when this is a regular load.
+     // Otherwise, this should never happen and is a suspected misuse of the API.
+-    MOZ_ASSERT_IF(alreadyRegistered, !aIsPreload);
++
++    // INF_PATCH: Triggered by france24.
++    //MOZ_ASSERT_IF(alreadyRegistered, !aIsPreload);
+   }
+ 
+   mKey = aKey;
+   mIsUsed = !aIsPreload;
+ 
+   if (!mIsUsed && !mUsageTimer) {
+     auto callback = MakeRefPtr<UsageTimer>(this, aDocument);
+     NS_NewTimerWithCallback(getter_AddRefs(mUsageTimer), callback, 10000,
+diff --git a/version.txt b/version.txt
+new file mode 100644
+--- /dev/null
++++ b/version.txt
+@@ -0,0 +1,3 @@
++https://hg.mozilla.org/mozilla-unified/rev/FIREFOX_91_3_0esr_RELEASE
++
++hg clone https://hg.mozilla.org/mozilla-unified -r 8802d620459d50ea648821a15497d06efd15732b mozilla
+\ No newline at end of file
+diff --git a/widget/CompositorWidget.h b/widget/CompositorWidget.h
+--- a/widget/CompositorWidget.h
++++ b/widget/CompositorWidget.h
+@@ -48,16 +48,20 @@ class CompositorWidgetInitData;
+ // here.
+ class PlatformCompositorWidgetDelegate;
+ 
+ // Headless mode uses its own, singular CompositorWidget implementation.
+ class HeadlessCompositorWidget;
+ 
+ class CompositorWidgetDelegate {
+  public:
++
++  // INF_PATCH
++  virtual void* Surface_Get() { return nullptr; }
++
+   virtual PlatformCompositorWidgetDelegate* AsPlatformSpecificDelegate() {
+     return nullptr;
+   }
+ 
+   virtual HeadlessCompositorWidget* AsHeadlessCompositorWidget() {
+     return nullptr;
+   }
+ };
+diff --git a/widget/nsBaseWidget.cpp b/widget/nsBaseWidget.cpp
+--- a/widget/nsBaseWidget.cpp
++++ b/widget/nsBaseWidget.cpp
+@@ -124,16 +124,21 @@ uint64_t AutoObserverNotifier::sObserver
+ /*static*/ nsTHashMap<uint64_t, nsCOMPtr<nsIObserver>>
+     AutoObserverNotifier::sSavedObservers;
+ 
+ // The maximum amount of time to let the EnableDragDrop runnable wait in the
+ // idle queue before timing out and moving it to the regular queue. Value is in
+ // milliseconds.
+ const uint32_t kAsyncDragDropTimeout = 1000;
+ 
++
++#ifdef INF_PATCH
++bool _Gecko_OffscreenSharedSurfaceMode();
++#endif
++
+ namespace mozilla::widget {
+ 
+ void IMENotification::SelectionChangeDataBase::SetWritingMode(
+     const WritingMode& aWritingMode) {
+   mWritingMode = aWritingMode.mWritingMode.bits;
+ }
+ 
+ WritingMode IMENotification::SelectionChangeDataBase::GetWritingMode() const {
+@@ -1312,16 +1317,26 @@ already_AddRefed<LayerManager> nsBaseWid
+     CreateCompositorVsyncDispatcher();
+ 
+     gfx::GPUProcessManager* gpu = gfx::GPUProcessManager::Get();
+     // Make sure GPU process is ready for use.
+     // If it failed to connect to GPU process, GPU process usage is disabled in
+     // EnsureGPUReady(). It could update gfxVars and gfxConfigs.
+     gpu->EnsureGPUReady();
+ 
++#ifdef INF_PATCH
++   if (_Gecko_OffscreenSharedSurfaceMode())
++   {
++		 // We've only patched D3D11 ClientLayerManager compositor thus far.
++		nsCString msg("infinity_override");
++      gfx::GPUProcessManager::Get()->DisableWebRender( wr::WebRenderError::INITIALIZE, msg);
++	}
++#endif // INF_PATCH
++
++
+     // If widget type does not supports acceleration, we may be allowed to use
+     // software WebRender instead. If not, then we use ClientLayerManager even
+     // when gfxVars::UseWebRender() is true. WebRender could coexist only with
+     // BasicCompositor.
+     bool supportsAcceleration = WidgetTypeSupportsAcceleration();
+     bool enableWR;
+     bool enableSWWR;
+     if (supportsAcceleration ||
+@@ -1464,16 +1479,27 @@ void nsBaseWidget::CreateCompositor(int 
+   if (lm->AsWebRenderLayerManager()) {
+     TextureFactoryIdentifier textureFactoryIdentifier =
+         lm->GetTextureFactoryIdentifier();
+     MOZ_ASSERT(textureFactoryIdentifier.mParentBackend ==
+                LayersBackend::LAYERS_WR);
+     ImageBridgeChild::IdentifyCompositorTextureHost(textureFactoryIdentifier);
+     gfx::VRManagerChild::IdentifyTextureHost(textureFactoryIdentifier);
+   } else if (lm->AsClientLayerManager()) {
++
++#ifdef INF_PATCH
++
++	if (_Gecko_OffscreenSharedSurfaceMode())
++	{
++		// Provide access the compositor native widget from the layer manager
++    	auto clm = lm->AsClientLayerManager();
++      clm->SetCompositorWidgetChild((void*) mCompositorSession->GetCompositorWidgetDelegate());
++	}
++#endif // INF_PATCH
++
+     TextureFactoryIdentifier textureFactoryIdentifier =
+         lm->GetTextureFactoryIdentifier();
+     // Some popup or transparent widgets may use a different backend than the
+     // compositors used with ImageBridge and VR (and more generally web
+     // content).
+     if (WidgetTypeSupportsAcceleration()) {
+       ImageBridgeChild::IdentifyCompositorTextureHost(textureFactoryIdentifier);
+       gfx::VRManagerChild::IdentifyTextureHost(textureFactoryIdentifier);
+diff --git a/widget/windows/CompositorWidgetChild.cpp b/widget/windows/CompositorWidgetChild.cpp
+--- a/widget/windows/CompositorWidgetChild.cpp
++++ b/widget/windows/CompositorWidgetChild.cpp
+@@ -26,16 +26,20 @@ CompositorWidgetChild::CompositorWidgetC
+       mWnd(reinterpret_cast<HWND>(
+           aInitData.get_WinCompositorWidgetInitData().hWnd())),
+       mTransparencyMode(
+           aInitData.get_WinCompositorWidgetInitData().transparencyMode()),
+       mRemoteBackbufferProvider() {
+   MOZ_ASSERT(XRE_IsParentProcess());
+   MOZ_ASSERT(!gfxPlatform::IsHeadless());
+   MOZ_ASSERT(mWnd && ::IsWindow(mWnd));
++
++#ifdef INF_PATCH
++  mSharedSurface = nullptr;
++#endif 
+ }
+ 
+ CompositorWidgetChild::~CompositorWidgetChild() {}
+ 
+ bool CompositorWidgetChild::Initialize() {
+   mRemoteBackbufferProvider = std::make_unique<remote_backbuffer::Provider>();
+   if (!mRemoteBackbufferProvider->Initialize(mWnd, OtherPid(),
+                                              mTransparencyMode)) {
+@@ -87,23 +91,37 @@ mozilla::ipc::IPCResult CompositorWidget
+   mVsyncDispatcher->SetCompositorVsyncObserver(nullptr);
+   return IPC_OK();
+ }
+ 
+ mozilla::ipc::IPCResult CompositorWidgetChild::RecvUpdateCompositorWnd(
+     const WindowsHandle& aCompositorWnd, const WindowsHandle& aParentWnd,
+     UpdateCompositorWndResolver&& aResolve) {
+   HWND parentWnd = reinterpret_cast<HWND>(aParentWnd);
++  
++#ifdef INF_PATCH
++   if (!aParentWnd)
++   {
++      // null parent window means we should assign a shared surface handle
++      Surface_Set((HANDLE) aCompositorWnd);
++   }
++   else {
++#endif // INF_PATCH
++  
+   if (mWnd == parentWnd) {
+     mCompositorWnd = reinterpret_cast<HWND>(aCompositorWnd);
+     ::SetParent(mCompositorWnd, mWnd);
+     aResolve(true);
+   } else {
+     aResolve(false);
+     gfxCriticalNote << "Parent winow does not match";
+     MOZ_ASSERT_UNREACHABLE("unexpected to happen");
+   }
+ 
++#ifdef INF_PATCH
++}
++#endif // INF_PATCH
++
+   return IPC_OK();
+ }
+ 
+ }  // namespace widget
+ }  // namespace mozilla
+diff --git a/widget/windows/CompositorWidgetChild.h b/widget/windows/CompositorWidgetChild.h
+--- a/widget/windows/CompositorWidgetChild.h
++++ b/widget/windows/CompositorWidgetChild.h
+@@ -24,16 +24,21 @@ class CompositorWidgetChild final : publ
+  public:
+   CompositorWidgetChild(RefPtr<CompositorVsyncDispatcher> aVsyncDispatcher,
+                         RefPtr<CompositorWidgetVsyncObserver> aVsyncObserver,
+                         const CompositorWidgetInitData& aInitData);
+   ~CompositorWidgetChild() override;
+ 
+   bool Initialize();
+ 
++// INF_PATCH[begin]
++  virtual void* Surface_Get() { return mSharedSurface; }
++  void  Surface_Set(void *value) { mSharedSurface = value; }
++// INF_PATCH[end]
++
+   void EnterPresentLock() override;
+   void LeavePresentLock() override;
+   void OnDestroyWindow() override;
+   bool OnWindowResize(const LayoutDeviceIntSize& aSize) override;
+   void OnWindowModeChange(nsSizeMode aSizeMode) override;
+   void UpdateTransparency(nsTransparencyMode aMode) override;
+   void ClearTransparentWindow() override;
+ 
+@@ -43,16 +48,20 @@ class CompositorWidgetChild final : publ
+       const WindowsHandle& aCompositorWnd, const WindowsHandle& aParentWnd,
+       UpdateCompositorWndResolver&& aResolve) override;
+ 
+  private:
+   RefPtr<CompositorVsyncDispatcher> mVsyncDispatcher;
+   RefPtr<CompositorWidgetVsyncObserver> mVsyncObserver;
+   HWND mCompositorWnd;
+ 
++#ifdef INF_PATCH
++  HANDLE mSharedSurface;
++#endif
++
+   HWND mWnd;
+   nsTransparencyMode mTransparencyMode;
+ 
+   std::unique_ptr<remote_backbuffer::Provider> mRemoteBackbufferProvider;
+ };
+ 
+ }  // namespace widget
+ }  // namespace mozilla
+diff --git a/widget/windows/WinMouseScrollHandler.cpp b/widget/windows/WinMouseScrollHandler.cpp
+--- a/widget/windows/WinMouseScrollHandler.cpp
++++ b/widget/windows/WinMouseScrollHandler.cpp
+@@ -19,16 +19,21 @@
+ #include "mozilla/MiscEvents.h"
+ #include "mozilla/MouseEvents.h"
+ #include "mozilla/Preferences.h"
+ #include "mozilla/dom/WheelEventBinding.h"
+ #include "mozilla/StaticPrefs_mousewheel.h"
+ 
+ #include <psapi.h>
+ 
++#ifdef INF_PATCH
++#include "_update_info.h"
++#include "adv_sw_patch.h"
++#endif  // INF_PATCH
++
+ namespace mozilla {
+ namespace widget {
+ 
+ LazyLogModule gMouseScrollLog("MouseScrollHandlerWidgets");
+ 
+ static const char* GetBoolName(bool aBool) { return aBool ? "TRUE" : "FALSE"; }
+ 
+ MouseScrollHandler* MouseScrollHandler::sInstance = nullptr;
+@@ -235,17 +240,22 @@ nsresult MouseScrollHandler::SynthesizeN
+     uint32_t aAdditionalFlags) {
+   bool useFocusedWindow = !(
+       aAdditionalFlags & nsIDOMWindowUtils::MOUSESCROLL_PREFER_WIDGET_AT_POINT);
+ 
+   POINT pt;
+   pt.x = aPoint.x;
+   pt.y = aPoint.y;
+ 
++#ifdef INF_PATCH
++  HWND target = useFocusedWindow ? (HWND) _WindowFromPoint(aWidget->GetWindowHandle(), (void*) &pt) : ::GetFocus();
++#else
+   HWND target = useFocusedWindow ? ::WindowFromPoint(pt) : ::GetFocus();
++#endif // INF_PATCH
++
+   NS_ENSURE_TRUE(target, NS_ERROR_FAILURE);
+ 
+   WPARAM wParam = 0;
+   LPARAM lParam = 0;
+   switch (aNativeMessage) {
+     case WM_MOUSEWHEEL:
+     case WM_MOUSEHWHEEL: {
+       lParam = MAKELPARAM(pt.x, pt.y);
+@@ -378,17 +388,22 @@ void MouseScrollHandler::ProcessNativeMo
+            aWidget,
+            aMessage == WM_MOUSEWHEEL    ? "WM_MOUSEWHEEL"
+            : aMessage == WM_MOUSEHWHEEL ? "WM_MOUSEHWHEEL"
+            : aMessage == WM_VSCROLL     ? "WM_VSCROLL"
+                                         : "WM_HSCROLL",
+            aWParam, aLParam, point.x, point.y));
+   MaybeLogKeyState();
+ 
++#ifdef INF_PATCH
++  HWND underCursorWnd = (HWND) _WindowFromPoint(aWidget->GetWindowHandle(), (void*) &point);
++#else
+   HWND underCursorWnd = ::WindowFromPoint(point);
++#endif // INF_PATCH
++
+   if (!underCursorWnd) {
+     MOZ_LOG(gMouseScrollLog, LogLevel::Info,
+             ("MouseScroll::ProcessNativeMouseWheelMessage: "
+              "No window is not found under the cursor"));
+     return;
+   }
+ 
+   if (Device::Elantech::IsPinchHackNeeded() &&
+diff --git a/widget/windows/nsWindow.cpp b/widget/windows/nsWindow.cpp
+--- a/widget/windows/nsWindow.cpp
++++ b/widget/windows/nsWindow.cpp
+@@ -227,16 +227,39 @@
+ 
+ using namespace mozilla;
+ using namespace mozilla::dom;
+ using namespace mozilla::gfx;
+ using namespace mozilla::layers;
+ using namespace mozilla::widget;
+ using namespace mozilla::plugins;
+ 
++#ifdef INF_PATCH
++
++#define INF_WND  NS_NATIVE_WINDOW
++
++// [REPLACE_ALL] ::WindowFromPoint( -> _WindowFromPoint(mWnd,
++// [REPLACE_ALL] ::UpdateWindow(    -> _UpdateWindow(
++
++// Ensure all ::InvalidateRect( and ::RedrawWindow( calls are patched to _InvalidateRect
++
++// Note: There's some ::InvalidateRect calls in dom\plugins\ipc\PluginInstanceChild.cpp
++// However, as native window plugins must be considered dynamic, there's no point patching them.
++
++#include "_update_info.h"
++#include "adv_sw_patch.h"
++
++void __cdecl _SetWindowTransparency(void *wnd, uint_8 alpha);
++
++#include "nsDeviceContext.h"
++#include "ClientLayerManager.h"
++#include "nsViewManager.h"
++
++#endif // INF_PATCH
++
+ /**************************************************************
+  **************************************************************
+  **
+  ** BLOCK: Variables
+  **
+  ** nsWindow Class static initializations and global variables.
+  **
+  **************************************************************
+@@ -626,16 +649,20 @@ nsWindow::nsWindow(bool aIsChildWindow)
+       mResizeState(NOT_RESIZING),
+       mIsChildWindow(aIsChildWindow) {
+   if (!gInitializedVirtualDesktopManager) {
+     TaskController::Get()->AddTask(
+         MakeAndAddRef<InitializeVirtualDesktopManagerTask>());
+     gInitializedVirtualDesktopManager = true;
+   }
+ 
++#ifdef INF_PATCH
++  mPopupParentPageNativeWindow = nullptr;
++#endif // INF_PATCH
++
+   mIconSmall = nullptr;
+   mIconBig = nullptr;
+   mWnd = nullptr;
+   mLastKillFocusWindow = nullptr;
+   mTransitionWnd = nullptr;
+   mPaintDC = nullptr;
+   mPrevWndProc = nullptr;
+   mNativeDragTarget = nullptr;
+@@ -893,16 +920,21 @@ nsresult nsWindow::Create(nsIWidget* aPa
+   bool isPIPWindow = aInitData && aInitData->mPIPWindow;
+   if (isPIPWindow && !IsWin8OrLater() &&
+       gfxConfig::IsEnabled(gfx::Feature::HW_COMPOSITING) &&
+       WidgetTypeSupportsAcceleration()) {
+     extendedStyle |= WS_EX_COMPOSITED;
+   }
+ 
+   if (mWindowType == eWindowType_popup) {
++
++#ifdef INF_PATCH
++     mPopupParentPageNativeWindow = (HWND) aNativeParent;
++#endif // INF_PATCH
++
+     if (!aParent) {
+       parent = nullptr;
+     }
+ 
+     if (!IsWin8OrLater() && HasBogusPopupsDropShadowOnMultiMonitor() &&
+         ShouldUseOffMainThreadCompositing()) {
+       extendedStyle |= WS_EX_COMPOSITED;
+     }
+@@ -922,16 +954,22 @@ nsresult nsWindow::Create(nsIWidget* aPa
+     } else {
+       style &= ~WS_CLIPCHILDREN;
+     }
+     if (aInitData->clipSiblings) {
+       style |= WS_CLIPSIBLINGS;
+     }
+   }
+ 
++#ifdef INF_PATCH
++  // Moz native windows are hidden without desktop icon. Infinity renders content where we need it.
++   if (_Gecko_OffscreenSharedSurfaceMode())
++       extendedStyle |= WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE;
++#endif // INF_PATCH
++
+   const wchar_t* className;
+   if (aInitData->mDropShadow) {
+     className = GetWindowPopupClass();
+   } else {
+     className = GetWindowClass();
+   }
+   // Plugins are created in the disabled state so that they can't
+   // steal focus away from our main window.  This is especially
+@@ -1005,16 +1043,32 @@ nsresult nsWindow::Create(nsIWidget* aPa
+   // on. For non-popup windows this gets corrected by the WM_DPICHANGED message
+   // which resets mDefaultScale, but for popup windows we don't reset
+   // mDefaultScale on that message. In order to ensure that popup windows
+   // spawned on a non-primary monitor end up with the correct scale, we reset
+   // mDefaultScale here so that it gets recomputed using the correct monitor now
+   // that we have a mWnd.
+   mDefaultScale = -1.0;
+ 
++#ifdef INF_PATCH
++
++  if (_Gecko_OffscreenSharedSurfaceMode())
++  {
++     // When we're running as a procedural texture, we make native HWND popups
++     // completely transparent so they are never visible on the desktop.
++     // TODO: Experiment with just hiding the window itself when time permits.
++     // Previously, an alpha of 5 was used & the popup placed behind the render
++     // window so mouse input was captured. This seems unnecessary so remove
++     // this comment if new behaviour proves to be satisfactory.
++     if (mWindowType == eWindowType_popup)
++       _SetWindowTransparency(mWnd, 5);
++  }
++
++#endif // INF_PATCH
++
+   if (mIsRTL) {
+     DWORD dwAttribute = TRUE;
+     DwmSetWindowAttribute(mWnd, DWMWA_NONCLIENT_RTL_LAYOUT, &dwAttribute,
+                           sizeof dwAttribute);
+   }
+ 
+   if (mOpeningAnimationSuppressed) {
+     SuppressAnimation(true);
+@@ -1115,16 +1169,60 @@ void nsWindow::LocalesChanged() {
+     DwmSetWindowAttribute(mWnd, DWMWA_NONCLIENT_RTL_LAYOUT, &dwAttribute,
+                           sizeof dwAttribute);
+     mIsRTL = isRTL;
+   }
+ }
+ 
+ // Close this nsWindow
+ void nsWindow::Destroy() {
++
++#ifdef INF_PATCH
++
++   if (_Gecko_OffscreenSharedSurfaceMode())
++   {
++      if (mWindowType == eWindowType_popup)
++      {
++         auto native_wnd = GetNativeData(INF_WND);
++
++         if (native_wnd && mPopupParentPageNativeWindow)
++         {
++            _PopupHide(native_wnd, mPopupParentPageNativeWindow);
++
++#if 1
++              // Force a redraw to remove expired popup.
++              // TODO: Reduce this down to essentials. Likely more than we need here.
++
++              nsWindow *parent = (nsWindow*) mParent.get();
++
++              if (parent)
++              {
++                 nsView* view = nsView::GetViewFor(parent);
++
++                 if (view)
++                 {
++                    view->GetViewManager()->InvalidateAllViews();
++                    view->SetForcedRepaint(true);
++                 }
++
++                 _InvalidateRect(mWnd, nullptr);
++                 parent->OnPaint(nullptr, 0);
++              }
++        
++              GetLayerManager()->ScheduleComposite();
++
++               if (mParent)
++                  mParent->Invalidate(mParent->GetBounds()); // Not sure this does anything. Didn't work by itself. TDOO: Comment out, if still works, remove.
++
++#endif  // Redraw
++
++         }
++      }
++   }
++#endif // INF_PATCH
+   // WM_DESTROY has already fired, avoid calling it twice
+   if (mOnDestroyCalled) return;
+ 
+   // Don't destroy windows that have file pickers open, we'll tear these down
+   // later once the picker is closed.
+   mDestroyCalled = true;
+   if (mPickerDisplayCount) return;
+ 
+@@ -1247,38 +1345,55 @@ DWORD nsWindow::WindowStyle() {
+     case eWindowType_plugin_ipc_content:
+     case eWindowType_child:
+       style = WS_OVERLAPPED;
+       break;
+ 
+     case eWindowType_dialog:
+       style = WS_OVERLAPPED | WS_BORDER | WS_DLGFRAME | WS_SYSMENU | DS_3DLOOK |
+               DS_MODALFRAME | WS_CLIPCHILDREN;
++
++#ifndef INF_PATCH
++      // Any border decoration is applied by Infinity window manager, not native desktop GUI.
+       if (mBorderStyle != eBorderStyle_default)
+         style |= WS_THICKFRAME | WS_MINIMIZEBOX | WS_MAXIMIZEBOX;
++#endif // INF_PATCH
++
+       break;
+ 
+     case eWindowType_popup:
+       style = WS_POPUP;
+       if (!HasGlass()) {
+         style |= WS_OVERLAPPED;
+       }
+       break;
+ 
+     default:
+       NS_ERROR("unknown border style");
+       // fall through
+ 
++// INF_PATCH: invisible below
+     case eWindowType_toplevel:
+-    case eWindowType_invisible:
++      
+       style = WS_OVERLAPPED | WS_BORDER | WS_DLGFRAME | WS_SYSMENU |
+               WS_THICKFRAME | WS_MINIMIZEBOX | WS_MAXIMIZEBOX | WS_CLIPCHILDREN;
+       break;
+-  }
+-
++
++#ifdef INF_PATCH
++    case eWindowType_invisible:
++       // No decorations - we're offscreen.
++       // TODO: New window type eWindowType_offscreen to ensure this causes no unwanted side affects for other stuff.
++       style = WS_POPUP|WS_CLIPCHILDREN;
++       break;
++#endif // INF_PATCH
++
++  }
++
++#ifndef INF_PATCH
++  // Any border decoration is applied by Infinity window manager, not native desktop GUI.
+   if (mBorderStyle != eBorderStyle_default &&
+       mBorderStyle != eBorderStyle_all) {
+     if (mBorderStyle == eBorderStyle_none ||
+         !(mBorderStyle & eBorderStyle_border))
+       style &= ~WS_BORDER;
+ 
+     if (mBorderStyle == eBorderStyle_none ||
+         !(mBorderStyle & eBorderStyle_title)) {
+@@ -1316,16 +1431,17 @@ DWORD nsWindow::WindowStyle() {
+     if (IsPopupWithTitleBar()) {
+       style |= WS_CAPTION;
+       if (mBorderStyle & eBorderStyle_close) {
+         style |= WS_SYSMENU;
+       }
+     }
+   }
+ 
++#endif // INF_PATCH
+   if (mIsChildWindow) {
+     style |= WS_CLIPCHILDREN;
+     if (!(style & WS_POPUP)) {
+       style |= WS_CHILD;  // WS_POPUP and WS_CHILD are mutually exclusive.
+     }
+   }
+ 
+   VERIFY_WINDOW_STYLE(style);
+@@ -1349,18 +1465,24 @@ DWORD nsWindow::WindowExStyle() {
+       if (mPopupLevel == ePopupLevelTop) extendedStyle |= WS_EX_TOPMOST;
+       return extendedStyle;
+     }
+     default:
+       NS_ERROR("unknown border style");
+       // fall through
+ 
+     case eWindowType_toplevel:
++// INF_PATCH: Invisible below
++      return WS_EX_WINDOWEDGE;
++
++#ifdef INF_PATCH
++    // Introduce _offscreen WindowType if invisible is used for other things.
+     case eWindowType_invisible:
+-      return WS_EX_WINDOWEDGE;
++       return WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE;
++#endif
+   }
+ }
+ 
+ /**************************************************************
+  *
+  * SECTION: Window subclassing utilities
+  *
+  * Set or clear window subclasses on native windows. Used in
+@@ -1687,22 +1809,26 @@ void nsWindow::Show(bool bState) {
+ 
+   bool syncInvalidate = false;
+ 
+   bool wasVisible = mIsVisible;
+   // Set the status now so that anyone asking during ShowWindow or
+   // SetWindowPos would get the correct answer.
+   mIsVisible = bState;
+ 
++#ifndef INF_PATCH
++  // INF_PATCH: Native window is never visible, we redirect them into infinity textures.
++  
+   // We may have cached an out of date visible state. This can happen
+   // when session restore sets the full screen mode.
+   if (mIsVisible)
+     mOldStyle |= WS_VISIBLE;
+   else
+     mOldStyle &= ~WS_VISIBLE;
++#endif // INF_PATCH
+ 
+   if (!mIsVisible && wasVisible) {
+     ClearCachedResources();
+   }
+ 
+   if (mWnd) {
+     if (bState) {
+       if (!wasVisible && mWindowType == eWindowType_toplevel) {
+@@ -1720,44 +1846,74 @@ void nsWindow::Show(bool bState) {
+             break;
+           case nsSizeMode_Maximized:
+             ::ShowWindow(mWnd, SW_SHOWMAXIMIZED);
+             break;
+           case nsSizeMode_Minimized:
+             ::ShowWindow(mWnd, SW_SHOWMINIMIZED);
+             break;
+           default:
++#ifndef INF_PATCH
+             if (CanTakeFocus() && !mAlwaysOnTop) {
+               ::ShowWindow(mWnd, SW_SHOWNORMAL);
+             } else {
+               ::ShowWindow(mWnd, SW_SHOWNOACTIVATE);
+               // Don't flicker the window if we're restoring session
+               if (!sIsRestoringSession) {
+                 Unused << GetAttention(2);
+               }
+             }
++#endif // INF_PATCH
+             break;
+         }
+       } else {
+         DWORD flags = SWP_NOSIZE | SWP_NOMOVE | SWP_SHOWWINDOW;
++#ifdef INF_PATCH
++        if (_Gecko_OffscreenSharedSurfaceMode())
++            flags |= SWP_NOACTIVATE;
++#endif // INF_PATCH
+         if (wasVisible) flags |= SWP_NOZORDER;
+         if (mAlwaysOnTop) flags |= SWP_NOACTIVATE;
+ 
+         if (mWindowType == eWindowType_popup) {
++#ifdef INF_PATCH
++           if (_Gecko_OffscreenSharedSurfaceMode())
++           {
++              auto native_widget = GetNativeData(INF_WND);
++
++              if (native_widget && mPopupParentPageNativeWindow)
++                 _PopupShow(native_widget, mPopupParentPageNativeWindow, this, flags);
++           }
++#endif // INF_PATCH
++
+           // ensure popups are the topmost of the TOPMOST
+           // layer. Remember not to set the SWP_NOZORDER
+           // flag as that might allow the taskbar to overlap
+           // the popup.
+           flags |= SWP_NOACTIVATE;
++
++#ifdef INF_PATCH
++ 			 if (_Gecko_OffscreenSharedSurfaceMode())
++          ::SetWindowPos(mWnd, HWND_BOTTOM, 0, 0, 0, 0, flags);
++          else {
+           HWND owner = ::GetWindow(mWnd, GW_OWNER);
+           ::SetWindowPos(mWnd, owner ? 0 : HWND_TOPMOST, 0, 0, 0, 0, flags);
++ 		 }
++#endif // INF_PATCH
++
+         } else {
+           if (mWindowType == eWindowType_dialog && !CanTakeFocus())
+             flags |= SWP_NOACTIVATE;
+ 
++#ifdef INF_PATCH
++          // Maintain exact window size we've asked for.
++          if (mWindowType == eWindowType_invisible)
++             flags |= SWP_NOMOVE|SWP_NOSIZE;
++#endif // INF_PATCH
++
+           ::SetWindowPos(mWnd, HWND_TOP, 0, 0, 0, 0, flags);
+         }
+       }
+ 
+       if (!wasVisible && (mWindowType == eWindowType_toplevel ||
+                           mWindowType == eWindowType_dialog)) {
+         // When a toplevel window or dialog is shown, initialize the UI state
+         ::SendMessageW(mWnd, WM_CHANGEUISTATE,
+@@ -1780,17 +1936,21 @@ void nsWindow::Show(bool bState) {
+       }
+     }
+   }
+ 
+ #ifdef MOZ_XUL
+   if (!wasVisible && bState) {
+     Invalidate();
+     if (syncInvalidate && !mInDtor && !mOnDestroyCalled) {
++#ifdef INF_PATCH
++     _UpdateWindow(mWnd);
++#else
+       ::UpdateWindow(mWnd);
++#endif // INF_PATCH
+     }
+   }
+ #endif
+ 
+   if (mOpeningAnimationSuppressed) {
+     SuppressAnimation(false);
+   }
+ }
+@@ -2335,16 +2495,20 @@ nsresult nsWindow::BeginResizeDrag(Widge
+ void nsWindow::PlaceBehind(nsTopLevelWidgetZPlacement aPlacement,
+                            nsIWidget* aWidget, bool aActivate) {
+   HWND behind = HWND_TOP;
+   if (aPlacement == eZPlacementBottom)
+     behind = HWND_BOTTOM;
+   else if (aPlacement == eZPlacementBelow && aWidget)
+     behind = (HWND)aWidget->GetNativeData(NS_NATIVE_WINDOW);
+   UINT flags = SWP_NOMOVE | SWP_NOREPOSITION | SWP_NOSIZE;
++#ifdef INF_PATCH
++  if (_Gecko_OffscreenSharedSurfaceMode())
++      aActivate=FALSE;
++#endif // INF_PATCH
+   if (!aActivate) flags |= SWP_NOACTIVATE;
+ 
+   if (!CanTakeFocus() && behind == HWND_TOP) {
+     // Can't place the window to top so place it behind the foreground window
+     // (as long as it is not topmost)
+     HWND wndAfter = ::GetForegroundWindow();
+     if (!wndAfter)
+       behind = HWND_BOTTOM;
+@@ -3057,16 +3221,19 @@ void nsWindow::InvalidateNonClientRegion
+   rect.bottom -= mHorResizeMargin;
+   rect.left += mVertResizeMargin;
+   MapWindowPoints(nullptr, mWnd, (LPPOINT)&rect, 2);
+   HRGN clientRgn = CreateRectRgnIndirect(&rect);
+   CombineRgn(winRgn, winRgn, clientRgn, RGN_DIFF);
+   DeleteObject(clientRgn);
+ 
+   // triggers ncpaint and paint events for the two areas
++#ifdef INF_PATCH
++  if (!_InvalidateRect(mWnd, nullptr))
++#endif
+   RedrawWindow(mWnd, nullptr, winRgn, RDW_FRAME | RDW_INVALIDATE);
+   DeleteObject(winRgn);
+ }
+ 
+ HRGN nsWindow::ExcludeNonClientFromPaintRegion(HRGN aRegion) {
+   RECT rect;
+   HRGN rgn = nullptr;
+   if (aRegion == (HRGN)1) {  // undocumented value indicating a full refresh
+@@ -3239,18 +3406,45 @@ static HCURSOR CursorForImage(const nsIW
+     return nullptr;
+   }
+ 
+   return cursor;
+ }
+ 
+ // Setting the actual cursor
+ void nsWindow::SetCursor(const Cursor& aCursor) {
++
++#ifdef INF_PATCH
++
++  if (_Gecko_OffscreenSharedSurfaceMode())
++  {
++      // TODO: Need eCursor_none defining so that webpage plugins can replace
++      // our cursor with their own when the cursor is over their surface.
++      
++	  if (mCursor != aCursor)
++	  {
++         UpdateInfo *info = _GetUpdateInfo(mWnd, true);
++
++         if (info)
++         {
++            // Hide Windows cursor ... this might not be required.
++            //::SetCursor(nullptr);
++			
++            info->SetCursor(mCursor == Cursor{eCursor_standard}); // for now.
++         }
++		   
++		 mCursor = aCursor;
++      }
++
++      return;
++  }
++#endif // INF_PATCH
++
+   mCursor = aCursor;
+-
++  
+   if (sCurrentCursor == aCursor && sCustomHCursor) {
+     ::SetCursor(sCustomHCursor);
+     return;
+   }
+ 
+   if (sCustomHCursor) {
+     ::DestroyIcon(sCustomHCursor);
+     sCustomHCursor = nullptr;
+@@ -3474,16 +3668,19 @@ void nsWindow::Invalidate(bool aEraseBac
+   }
+   if (aUpdateNCArea) {
+     flags |= RDW_FRAME;
+   }
+   if (aIncludeChildren) {
+     flags |= RDW_ALLCHILDREN;
+   }
+ 
++#ifdef INF_PATCH
++  if (!_InvalidateRect(mWnd, nullptr))
++#endif
+   VERIFY(::RedrawWindow(mWnd, nullptr, nullptr, flags));
+ }
+ 
+ // Invalidate this component visible area
+ void nsWindow::Invalidate(const LayoutDeviceIntRect& aRect) {
+   if (mWnd) {
+ #ifdef WIDGET_DEBUG_OUTPUT
+     debug_DumpInvalidate(stdout, this, &aRect, "noname", (int32_t)mWnd);
+@@ -3491,16 +3688,19 @@ void nsWindow::Invalidate(const LayoutDe
+ 
+     RECT rect;
+ 
+     rect.left = aRect.X();
+     rect.top = aRect.Y();
+     rect.right = aRect.XMost();
+     rect.bottom = aRect.YMost();
+ 
++#ifdef INF_PATCH
++    if (!_InvalidateRect(mWnd, &rect))
++#endif // INF_PATCH
+     VERIFY(::InvalidateRect(mWnd, &rect, FALSE));
+   }
+ }
+ 
+ static LRESULT CALLBACK FullscreenTransitionWindowProc(HWND hWnd, UINT uMsg,
+                                                        WPARAM wParam,
+                                                        LPARAM lParam) {
+   switch (uMsg) {
+@@ -3623,18 +3823,21 @@ bool nsWindow::PrepareForFullscreenTrans
+   if (!gfxWindowsPlatform::GetPlatform()->DwmCompositionEnabled()) {
+     return false;
+   }
+ 
+   FullscreenTransitionInitData initData;
+   nsCOMPtr<nsIScreen> screen = GetWidgetScreen();
+   int32_t x, y, width, height;
+   screen->GetRectDisplayPix(&x, &y, &width, &height);
+-  MOZ_ASSERT(BoundsUseDesktopPixels(),
+-             "Should only be called on top-level window");
++  
++  // INF_PATCH: Disabled becoz its a window type assert not expecting our invisible window type.
++  //MOZ_ASSERT(BoundsUseDesktopPixels(),
++    //         "Should only be called on top-level window");
++  
+   double scale = GetDesktopToDeviceScale().scale;  // XXX or GetDefaultScale() ?
+   initData.mBounds.SetRect(NSToIntRound(x * scale), NSToIntRound(y * scale),
+                            NSToIntRound(width * scale),
+                            NSToIntRound(height * scale));
+ 
+   // Create a semaphore for synchronizing the window handle which will
+   // be created by the transition thread and used by the main thread for
+   // posting the transition messages.
+@@ -3753,18 +3956,23 @@ void* nsWindow::GetNativeData(uint32_t a
+           nullptr, nsToolkit::mDllInstance, nullptr);
+     case NS_NATIVE_PLUGIN_ID:
+     case NS_NATIVE_PLUGIN_PORT:
+     case NS_NATIVE_WIDGET:
+     case NS_NATIVE_WINDOW:
+     case NS_NATIVE_WINDOW_WEBRTC_DEVICE_ID:
+       return (void*)mWnd;
+     case NS_NATIVE_GRAPHIC:
++#ifdef INF_PATCH
++       // Not used - so we'll patch here for now :)
++       return mCompositorWidgetDelegate ? mCompositorWidgetDelegate->Surface_Get() : nullptr;
++#else
+       MOZ_ASSERT_UNREACHABLE("Not supported on Windows:");
+       return nullptr;
++#endif // INF_PATCH
+     case NS_RAW_NATIVE_IME_CONTEXT: {
+       void* pseudoIMEContext = GetPseudoIMEContext();
+       if (pseudoIMEContext) {
+         return pseudoIMEContext;
+       }
+       [[fallthrough]];
+     }
+     case NS_NATIVE_TSF_THREAD_MGR:
+@@ -4296,18 +4504,24 @@ void nsWindow::SetWindowClass(const nsAS
+  *
+  **************************************************************/
+ 
+ // Event initialization
+ void nsWindow::InitEvent(WidgetGUIEvent& event, LayoutDeviceIntPoint* aPoint) {
+   if (nullptr == aPoint) {  // use the point from the event
+     // get the message position in client coordinates
+     if (mWnd != nullptr) {
++
++#ifdef INF_PATCH
++    DWORD pos = _GetMessagePos(mWnd);
++ 	POINT cpos;
++#else
+       DWORD pos = ::GetMessagePos();
+       POINT cpos;
++#endif // INF_PATCH
+ 
+       cpos.x = GET_X_LPARAM(pos);
+       cpos.y = GET_Y_LPARAM(pos);
+ 
+       ::ScreenToClient(mWnd, &cpos);
+       event.mRefPoint = LayoutDeviceIntPoint(cpos.x, cpos.y);
+     } else {
+       event.mRefPoint = LayoutDeviceIntPoint(0, 0);
+@@ -4401,17 +4615,23 @@ bool nsWindow::DispatchWindowEvent(Widge
+ // Recursively dispatch synchronous paints for nsIWidget
+ // descendants with invalidated rectangles.
+ BOOL CALLBACK nsWindow::DispatchStarvedPaints(HWND aWnd, LPARAM aMsg) {
+   LONG_PTR proc = ::GetWindowLongPtrW(aWnd, GWLP_WNDPROC);
+   if (proc == (LONG_PTR)&nsWindow::WindowProc) {
+     // its one of our windows so check to see if it has a
+     // invalidated rect. If it does. Dispatch a synchronous
+     // paint.
+-    if (GetUpdateRect(aWnd, nullptr, FALSE)) VERIFY(::UpdateWindow(aWnd));
++    if (GetUpdateRect(aWnd, nullptr, FALSE))
++#ifdef INF_PATCH
++     // TODO: ^ GetUpdateRect above needs patching as we're working with hidden windows.
++     VERIFY(_UpdateWindow(aWnd));
++#else
++      VERIFY(::UpdateWindow(aWnd));
++#endif // INF_PATCH
+   }
+   return TRUE;
+ }
+ 
+ // Check for pending paints and dispatch any pending paint
+ // messages for any nsIWidget which is a descendant of the
+ // top-level window that *this* window is embedded within.
+ //
+@@ -4760,26 +4980,42 @@ void nsWindow::DispatchFocusToTopLevelWi
+         win->mWidgetListener->WindowActivated();
+       } else {
+         win->mWidgetListener->WindowDeactivated();
+       }
+     }
+   }
+ }
+ 
++#ifdef INF_PATCH
++HWND nsWindow::WindowAtMouse(HWND aWnd) {
++
++  HWND hroot = WinUtils::GetTopLevelHWND(aWnd);
++  DWORD pos = _GetMessagePos(hroot);
++  POINT mp;
++  mp.x = GET_X_LPARAM(pos);
++  mp.y = GET_Y_LPARAM(pos);
++  return (HWND) _WindowFromPoint(hroot, (void*) &mp);
++#else
+ HWND nsWindow::WindowAtMouse() {
+   DWORD pos = ::GetMessagePos();
+   POINT mp;
+   mp.x = GET_X_LPARAM(pos);
+   mp.y = GET_Y_LPARAM(pos);
+   return ::WindowFromPoint(mp);
++#endif // INF_PATCH
+ }
+ 
+ bool nsWindow::IsTopLevelMouseExit(HWND aWnd) {
++	
++#ifdef INF_PATCH
++  HWND mouseWnd = WindowAtMouse(aWnd);
++#else
+   HWND mouseWnd = WindowAtMouse();
++#endif // INF_PATCH
+ 
+   // WinUtils::GetTopLevelHWND() will return a HWND for the window frame
+   // (which includes the non-client area).  If the mouse has moved into
+   // the non-client area, we should treat it as a top-level exit.
+   HWND mouseTopLevel = WinUtils::GetTopLevelHWND(mouseWnd);
+   if (mouseWnd == mouseTopLevel) return true;
+ 
+   return WinUtils::GetTopLevelHWND(aWnd) != mouseTopLevel;
+@@ -5473,28 +5709,57 @@ bool nsWindow::ProcessMessage(UINT msg, 
+         case PBT_APMRESUMECRITICAL:
+         case PBT_APMRESUMESUSPEND:
+           PostSleepWakeNotification(false);
+           break;
+       }
+       break;
+ 
+     case WM_CLOSE:  // close request
++#ifndef INF_PATCH
+       if (mWidgetListener) mWidgetListener->RequestWindowClose(this);
++#endif
++     
+       result = true;  // abort window closure
+       break;
+ 
+     case WM_DESTROY:
+       // clean up.
+       DestroyLayerManager();
+       OnDestroy();
+       result = true;
+       break;
+ 
+     case WM_PAINT:
++
++#ifdef INF_PATCH
++      if (_Gecko_OffscreenSharedSurfaceMode())
++      {
++         // ADV: Ensure gecko never paints windows direct - we work entirely from offscreen surfaces.
++         if (mWindowType == eWindowType_popup)
++         {
++            // TODO[OPT]: Popups don't require full update_info structure - just a simple update_available flag. 
++
++            UpdateInfo *info = _GetUpdateInfo(mWnd, true);
++
++            if (!info)
++            {
++               info = _CreateUpdateInfo(mWnd, nullptr);
++               info = _GetUpdateInfo(mWnd, true);
++            }
++
++            if (info)
++            {
++               info->RegisterFullUpdateRequired();
++               _ReleaseUpdateInfo(info);
++            }
++         }
++      }
++      else
++#endif // INF_PATCH
+       *aRetValue = (int)OnPaint(nullptr, 0);
+       result = true;
+       break;
+ 
+     case WM_PRINTCLIENT:
+       result = OnPaint((HDC)wParam, 0);
+       break;
+ 
+@@ -5639,34 +5904,49 @@ bool nsWindow::ProcessMessage(UINT msg, 
+       if (!mMousePresent) break;
+       if (mMouseInDraggableArea) break;
+       mMousePresent = false;
+ 
+       // Check if the mouse is over the fullscreen transition window, if so
+       // clear sLastMouseMovePoint. This way the WM_MOUSEMOVE we get after the
+       // transition window disappears will not be ignored, even if the mouse
+       // hasn't moved.
++#ifdef INF_PATCH
++      if (mTransitionWnd && WindowAtMouse(mWnd) == mTransitionWnd) {
++#else
+       if (mTransitionWnd && WindowAtMouse() == mTransitionWnd) {
++#endif
+         sLastMouseMovePoint = {0};
+       }
+ 
+       // We need to check mouse button states and put them in for
+       // wParam.
+       WPARAM mouseState = (GetKeyState(VK_LBUTTON) ? MK_LBUTTON : 0) |
+                           (GetKeyState(VK_MBUTTON) ? MK_MBUTTON : 0) |
+                           (GetKeyState(VK_RBUTTON) ? MK_RBUTTON : 0);
+       // Synthesize an event position because we don't get one from
+       // WM_MOUSELEAVE.
++#ifdef INF_PATCH
++      LPARAM pos = lParamToClient(_GetMessagePos(mWnd));
++#else
+       LPARAM pos = lParamToClient(::GetMessagePos());
++#endif // INF_PATCH
++
+       DispatchMouseEvent(eMouseExitFromWidget, mouseState, pos, false,
+                          MouseButton::ePrimary, MOUSE_INPUT_SOURCE());
+     } break;
+ 
+     case MOZ_WM_PEN_LEAVES_HOVER_OF_DIGITIZER: {
++
++#ifdef INF_PATCH
++       LPARAM pos = lParamToClient(_GetMessagePos(mWnd));
++#else
+       LPARAM pos = lParamToClient(::GetMessagePos());
++#endif // INF_PATCH
++
+       MOZ_ASSERT(InkCollector::sInkCollector);
+       uint16_t pointerId = InkCollector::sInkCollector->GetPointerId();
+       if (pointerId != 0) {
+         WinPointerInfo pointerInfo;
+         pointerInfo.pointerId = pointerId;
+         DispatchMouseEvent(eMouseExitFromWidget, wParam, pos, false,
+                            MouseButton::ePrimary,
+                            MouseEvent_Binding::MOZ_SOURCE_PEN, &pointerInfo);
+@@ -5687,17 +5967,23 @@ bool nsWindow::ProcessMessage(UINT msg, 
+       }
+ 
+       // if the context menu is brought up from the keyboard, |lParam|
+       // will be -1.
+       LPARAM pos;
+       bool contextMenukey = false;
+       if (lParam == -1) {
+         contextMenukey = true;
++
++#ifdef INF_PATCH
++        pos = lParamToClient(_GetMessagePos(mWnd));
++#else
+         pos = lParamToClient(GetMessagePos());
++#endif // INF_PATCH
++
+       } else {
+         pos = lParamToClient(lParam);
+       }
+ 
+       result = DispatchMouseEvent(
+           eContextMenu, wParam, pos, contextMenukey,
+           contextMenukey ? MouseButton::ePrimary : MouseButton::eSecondary,
+           MOUSE_INPUT_SOURCE());
+@@ -6639,19 +6925,34 @@ nsresult nsWindow::SynthesizeNativeMouse
+       break;
+     }
+     case NativeMouseMessage::EnterWindow:
+     case NativeMouseMessage::LeaveWindow:
+       MOZ_ASSERT_UNREACHABLE("Non supported mouse event on Windows");
+       return NS_ERROR_INVALID_ARG;
+   }
+ 
++#ifdef INF_PATCH
++
++  LPARAM lp = MAKELPARAM(aPoint.x, aPoint.y);
++
++  if (aNativeMessage == NativeMouseMessage::Move)
++  {
++    DispatchMouseEvent(eMouseMove, 0, lp, false, aButton, 0, nullptr);
++  }
++  else if (aNativeMessage == NativeMouseMessage::ButtonDown)
++    DispatchMouseEvent(eMouseDown, 0, lp, false, aButton, 0, nullptr);
++  else if (aNativeMessage == NativeMouseMessage::ButtonUp)
++    DispatchMouseEvent(eMouseUp, 0, lp, false, aButton, 0, nullptr);
++
++#else
+   input.type = INPUT_MOUSE;
+   ::SetCursorPos(aPoint.x, aPoint.y);
+   ::SendInput(1, &input, sizeof(INPUT));
++#endif // INF_PATCH
+ 
+   return NS_OK;
+ }
+ 
+ nsresult nsWindow::SynthesizeNativeMouseScrollEvent(
+     LayoutDeviceIntPoint aPoint, uint32_t aNativeMessage, double aDeltaX,
+     double aDeltaY, double aDeltaZ, uint32_t aModifierFlags,
+     uint32_t aAdditionalFlags, nsIObserver* aObserver) {
+@@ -6790,29 +7091,35 @@ void nsWindow::OnWindowPosChanged(WINDOW
+       RECT drect;
+ 
+       // getting wider
+       drect.left = wp->x + mLastSize.width;
+       drect.top = wp->y;
+       drect.right = drect.left + (newWidth - mLastSize.width);
+       drect.bottom = drect.top + newHeight;
+ 
++#ifdef INF_PATCH
++  if (!_InvalidateRect(mWnd, nullptr))
++#endif
+       ::RedrawWindow(mWnd, &drect, nullptr,
+                      RDW_INVALIDATE | RDW_NOERASE | RDW_NOINTERNALPAINT |
+                          RDW_ERASENOW | RDW_ALLCHILDREN);
+     }
+     if (newHeight > mLastSize.height) {
+       RECT drect;
+ 
+       // getting taller
+       drect.left = wp->x;
+       drect.top = wp->y + mLastSize.height;
+       drect.right = drect.left + newWidth;
+       drect.bottom = drect.top + (newHeight - mLastSize.height);
+ 
++#ifdef INF_PATCH
++  if (!_InvalidateRect(mWnd, nullptr))
++#endif
+       ::RedrawWindow(mWnd, &drect, nullptr,
+                      RDW_INVALIDATE | RDW_NOERASE | RDW_NOINTERNALPAINT |
+                          RDW_ERASENOW | RDW_ALLCHILDREN);
+     }
+ 
+     mBounds.SizeTo(newWidth, newHeight);
+     mLastSize.width = newWidth;
+     mLastSize.height = newHeight;
+@@ -8044,16 +8351,23 @@ static bool IsDifferentThreadWindow(HWND
+   return ::GetCurrentThreadId() != ::GetWindowThreadProcessId(aWnd, nullptr);
+ }
+ 
+ // static
+ bool nsWindow::EventIsInsideWindow(nsWindow* aWindow,
+                                    Maybe<POINT> aEventPoint) {
+   RECT r;
+   ::GetWindowRect(aWindow->mWnd, &r);
++
++#ifdef INF_PATCH
++  DWORD pos = _GetMessagePos(aWindow->mWnd);
++#else
++  DWORD pos = GetMessagePos();
++#endif // INF_PATCH
++
+   POINT mp;
+   if (aEventPoint) {
+     mp = *aEventPoint;
+   } else {
+     DWORD pos = ::GetMessagePos();
+     mp.x = GET_X_LPARAM(pos);
+     mp.y = GET_Y_LPARAM(pos);
+   }
+diff --git a/widget/windows/nsWindow.h b/widget/windows/nsWindow.h
+--- a/widget/windows/nsWindow.h
++++ b/widget/windows/nsWindow.h
+@@ -449,16 +449,19 @@ class nsWindow final : public nsWindowBa
+   static void UpdateFirstEventTime(DWORD aEventTime);
+   void FinishLiveResizing(ResizeState aNewState);
+   LayoutDeviceIntPoint GetTouchCoordinates(WPARAM wParam, LPARAM lParam);
+   mozilla::Maybe<mozilla::PanGestureInput> ConvertTouchToPanGesture(
+       const mozilla::MultiTouchInput& aTouchInput, PTOUCHINPUT aOriginalEvent);
+   void DispatchTouchOrPanGestureInput(mozilla::MultiTouchInput& aTouchInput,
+                                       PTOUCHINPUT aOSEvent);
+ 
++#ifdef INF_PATCH
++   HWND mPopupParentPageNativeWindow;
++#endif // INF_PATCH  
+   /**
+    * Event handlers
+    */
+   virtual void OnDestroy() override;
+   bool OnResize(const LayoutDeviceIntSize& aSize);
+   void OnSizeModeChange(nsSizeMode aSizeMode);
+   bool OnGesture(WPARAM wParam, LPARAM lParam);
+   bool OnTouch(WPARAM wParam, LPARAM lParam);
+@@ -526,17 +529,23 @@ class nsWindow final : public nsWindowBa
+ 
+   static bool IsAsyncResponseEvent(UINT aMsg, LRESULT& aResult);
+   void IPCWindowProcHandler(UINT& msg, WPARAM& wParam, LPARAM& lParam);
+ 
+   /**
+    * Misc.
+    */
+   void StopFlashing();
++  
++#ifdef INF_PATCH
++  static HWND WindowAtMouse(HWND aWnd);
++#else
+   static HWND WindowAtMouse();
++#endif
++	  
+   static bool IsTopLevelMouseExit(HWND aWnd);
+   virtual nsresult SetWindowClipRegion(
+       const nsTArray<LayoutDeviceIntRect>& aRects,
+       bool aIntersectWithExisting) override;
+   LayoutDeviceIntRegion GetRegionToPaint(bool aForceFullRepaint, PAINTSTRUCT ps,
+                                          HDC aDC);
+   void ClearCachedResources();
+   nsIWidgetListener* GetPaintListener();
+diff --git a/widget/windows/nsWindowGfx.cpp b/widget/windows/nsWindowGfx.cpp
+--- a/widget/windows/nsWindowGfx.cpp
++++ b/widget/windows/nsWindowGfx.cpp
+@@ -50,16 +50,69 @@
+ #include "nsUXThemeConstants.h"
+ 
+ using namespace mozilla;
+ using namespace mozilla::gfx;
+ using namespace mozilla::layers;
+ using namespace mozilla::widget;
+ using namespace mozilla::plugins;
+ 
++ 
++#ifdef INF_PATCH
++
++#include "_update_info.h"
++
++static bool _GetRegionToPaint(HWND hwnd, LayoutDeviceIntRegion &region)
++{
++   UpdateInfo *uinfo = _GetUpdateInfo(hwnd, true);
++
++   if (!uinfo)
++      return false;
++
++   if (uinfo->IsFullUpdateRequired())
++   {
++      RECT rect;
++      ::GetClientRect(hwnd, &rect);
++	   region = LayoutDeviceIntRegion(WinUtils::ToIntRect(rect));
++   }
++   else
++   {
++      unsigned int iterator = 0;
++
++      for (;;)
++      {
++         DirtyRect *r = uinfo->Get(iterator);
++
++         if (!r)
++            break;
++
++         iterator++;
++
++         RECT r_dirty;
++			r_dirty.left  = (uint32_t) r->x;
++			r_dirty.top   = (uint32_t) r->y;
++			r_dirty.right = (uint32_t) (r->x+r->width);
++			r_dirty.bottom = (uint32_t) (r->y+ r->height);
++
++         // Add update region to clip path.
++         // Not sure if we can pass self as a parameter so paranoia to start with.
++         LayoutDeviceIntRegion current = region;
++         region.Or(current, WinUtils::ToIntRect(r_dirty));
++      }
++   }
++
++   _ReleaseUpdateInfo(uinfo);
++
++   return true;
++}
++
++#endif // INF_PATCH
++
++
++
+ /**************************************************************
+  **************************************************************
+  **
+  ** BLOCK: Variables
+  **
+  ** nsWindow Class static initializations and global variables.
+  **
+  **************************************************************
+@@ -221,23 +274,34 @@ bool nsWindow::OnPaint(HDC aDC, uint32_t
+     ::GetUpdateRgn(mWnd, debugPaintFlashRegion, TRUE);
+     debugPaintFlashDC = ::GetDC(mWnd);
+   }
+ #endif  // WIDGET_DEBUG_OUTPUT
+ 
+   HDC hDC = aDC ? aDC : (::BeginPaint(mWnd, &ps));
+   mPaintDC = hDC;
+ 
++#ifdef INF_PATCH
++   LayoutDeviceIntRegion region;
++   bool adv_sw_page_patch_active = _GetRegionToPaint(mWnd, region);
++
++   if (!adv_sw_page_patch_active)
++   {
++#endif // INF_PATCH
+ #ifdef MOZ_XUL
+   bool forceRepaint = aDC || (eTransparencyTransparent == mTransparencyMode);
+ #else
+   bool forceRepaint = nullptr != aDC;
+ #endif
++#ifdef INF_PATCH
++      region = GetRegionToPaint(forceRepaint, ps, hDC);
++   }
++#else
+   LayoutDeviceIntRegion region = GetRegionToPaint(forceRepaint, ps, hDC);
+-
++#endif // INF_PATCH
+   if (GetLayerManager()->AsKnowsCompositor()) {
+     // We need to paint to the screen even if nothing changed, since if we
+     // don't have a compositing window manager, our pixels could be stale.
+     GetLayerManager()->SetNeedsComposite(true);
+     GetLayerManager()->SendInvalidRegion(region.ToUnknownRegion());
+   }
+ 
+   RefPtr<nsWindow> strongThis(this);
+diff --git a/xpcom/base/AppShutdown.cpp b/xpcom/base/AppShutdown.cpp
+--- a/xpcom/base/AppShutdown.cpp
++++ b/xpcom/base/AppShutdown.cpp
+@@ -125,16 +125,23 @@ void AppShutdown::SaveEnvVarsForPotentia
+ }
+ 
+ const char* AppShutdown::GetObserverKey(ShutdownPhase aPhase) {
+   return sPhaseObserverKeys[static_cast<std::underlying_type_t<ShutdownPhase>>(
+       aPhase)];
+ }
+ 
+ void AppShutdown::MaybeDoRestart() {
++	
++#ifdef INF_PATCH
++    // Important: Not currently possible. Infinity app interface requires an upgrade to support apps that wish to restart themselves.
++    // As of right now this would create a disconnected zombie process tree & no interoperability, so we disable.
++   return;
++#endif // INF_PATCH
++	
+   if (sShutdownMode == AppShutdownMode::Restart) {
+     StopLateWriteChecks();
+ 
+     // Since we'll be launching our child while we're still alive, make sure
+     // we've unlocked the profile first, otherwise the child could hit its
+     // profile lock check before we've exited and thus released our lock.
+     UnlockProfile();
+ 
+diff --git a/xpcom/base/Logging.cpp b/xpcom/base/Logging.cpp
+--- a/xpcom/base/Logging.cpp
++++ b/xpcom/base/Logging.cpp
+@@ -823,16 +823,29 @@ void LogModule::SetLevel(LogLevel level)
+   // If the log module contains `::` it is likely a rust module, so we
+   // pass the level into the rust code so it will know to forward the logging
+   // to Gecko.
+   if (strstr(mName, "::")) {
+     set_rust_log_level(mName, static_cast<uint8_t>(level));
+   }
+ }
+ 
++
++// INF_PATCH: Custom log filtering.
++bool LogModule::ShouldLog(LogLevel aLevel) const 
++{ 
++#if 0
++   if (strstr(mName, "Media"))
++      return true;
++#endif
++
++   return mLevel >= aLevel; 
++}
++
++
+ void LogModule::Init(int argc, char* argv[]) {
+   // NB: This method is not threadsafe; it is expected to be called very early
+   //     in startup prior to any other threads being run.
+   MOZ_DIAGNOSTIC_ASSERT(NS_IsMainThread());
+ 
+   if (sLogModuleManager) {
+     // Already initialized.
+     return;
+diff --git a/xpcom/base/Logging.h b/xpcom/base/Logging.h
+--- a/xpcom/base/Logging.h
++++ b/xpcom/base/Logging.h
+@@ -117,17 +117,19 @@ class LogModule {
+   /**
+    * @param aIsSync If we should flush the file after every logged message.
+    */
+   static void SetIsSync(bool aIsSync);
+ 
+   /**
+    * Indicates whether or not the given log level is enabled.
+    */
+-  bool ShouldLog(LogLevel aLevel) const { return mLevel >= aLevel; }
++ 
++  // INF_PATCH: Implemented Logging.cpp so can tweak without requiring full rebuild.
++  bool ShouldLog(LogLevel aLevel) const;
+ 
+   /**
+    * Retrieves the log module's current level.
+    */
+   LogLevel Level() const { return mLevel; }
+ 
+   /**
+    * Sets the log module's level.
+diff --git a/xpcom/base/nsCrashOnException.cpp b/xpcom/base/nsCrashOnException.cpp
+--- a/xpcom/base/nsCrashOnException.cpp
++++ b/xpcom/base/nsCrashOnException.cpp
+@@ -19,16 +19,22 @@ static int ReportException(EXCEPTION_POI
+   }
+ 
+   return EXCEPTION_EXECUTE_HANDLER;
+ }
+ 
+ XPCOM_API(LRESULT)
+ CallWindowProcCrashProtected(WNDPROC aWndProc, HWND aHWnd, UINT aMsg,
+                              WPARAM aWParam, LPARAM aLParam) {
++
++#if defined INF_PATCH && defined DEBUG
++   // Debugging - turn off crash protection so fault can be diagnosed.
++   return aWndProc(aHWnd, aMsg, aWParam, aLParam);
++#else
+   MOZ_SEH_TRY { return aWndProc(aHWnd, aMsg, aWParam, aLParam); }
+   MOZ_SEH_EXCEPT(ReportException(GetExceptionInformation())) {
+     ::TerminateProcess(::GetCurrentProcess(), 253);
+   }
++#endif // INF_PATCH
+   return 0;  // not reached
+ }
+ 
+ }  // namespace mozilla
+diff --git a/xpcom/build/XPCOMInit.cpp b/xpcom/build/XPCOMInit.cpp
+--- a/xpcom/build/XPCOMInit.cpp
++++ b/xpcom/build/XPCOMInit.cpp
+@@ -296,20 +296,20 @@ NS_InitXPCOM(nsIServiceManager** aResult
+   }
+ 
+   MessageLoop* messageLoop = MessageLoop::current();
+   if (!messageLoop) {
+     sMessageLoop = new MessageLoopForUI(MessageLoop::TYPE_MOZILLA_PARENT);
+     sMessageLoop->set_thread_name("Gecko");
+     // Set experimental values for main thread hangs:
+     // 128ms for transient hangs and 8192ms for permanent hangs
+-    sMessageLoop->set_hang_timeouts(128, 8192);
++    sMessageLoop->set_hang_timeouts(0, 0);  // INF_PATCH
+   } else if (messageLoop->type() == MessageLoop::TYPE_MOZILLA_CHILD) {
+     messageLoop->set_thread_name("Gecko_Child");
+-    messageLoop->set_hang_timeouts(128, 8192);
++    messageLoop->set_hang_timeouts(0, 0);  // INF_PATCH
+   }
+ 
+   if (XRE_IsParentProcess() &&
+       !BrowserProcessSubThread::GetMessageLoop(BrowserProcessSubThread::IO)) {
+     mozilla::UniquePtr<BrowserProcessSubThread> ioThread =
+         mozilla::MakeUnique<BrowserProcessSubThread>(
+             BrowserProcessSubThread::IO);
+ 
+diff --git a/xpcom/components/nsServiceManagerUtils.h b/xpcom/components/nsServiceManagerUtils.h
+--- a/xpcom/components/nsServiceManagerUtils.h
++++ b/xpcom/components/nsServiceManagerUtils.h
+@@ -25,17 +25,22 @@ inline nsGetServiceByContractID do_GetSe
+ 
+ inline nsGetServiceByContractIDWithError do_GetService(const char* aContractID,
+                                                        nsresult* aError) {
+   return nsGetServiceByContractIDWithError(aContractID, aError);
+ }
+ 
+ nsresult CallGetService(const nsCID& aClass, const nsIID& aIID, void** aResult);
+ 
+-nsresult CallGetService(const char* aContractID, const nsIID& aIID,
++#ifdef INF_PATCH
++XPCOM_API(nsresult) 
++#else
++nsresult
++#endif // INF_PATCH
++CallGetService(const char* aContractID, const nsIID& aIID,
+                         void** aResult);
+ 
+ // type-safe shortcuts for calling |GetService|
+ template <class DestinationType>
+ inline nsresult CallGetService(const nsCID& aClass,
+                                DestinationType** aDestination) {
+   MOZ_ASSERT(aDestination, "null parameter");
+ 
+diff --git a/xpcom/reflect/xptinfo/xptinfo.cpp b/xpcom/reflect/xptinfo/xptinfo.cpp
+--- a/xpcom/reflect/xptinfo/xptinfo.cpp
++++ b/xpcom/reflect/xptinfo/xptinfo.cpp
+@@ -93,8 +93,31 @@ const char* nsXPTMethodInfo::SymbolDescr
+ bool nsXPTMethodInfo::GetId(JSContext* aCx, jsid& aId) const {
+   if (IsSymbol()) {
+     aId = SYMBOL_TO_JSID(GetSymbol(aCx));
+     return true;
+   }
+ 
+   return mozilla::dom::AtomizeAndPinJSString(aCx, aId, Name());
+ }
++
++// INF_PATCH: Move out of header so we can experiment.
++// Defined in: mozilla\dom\bindings\DOMJSClass.h
++bool PrefableDisablers::isEnabled(JSContext* cx, JS::Handle<JSObject*> obj) const {
++
++    if (nonExposedGlobals &&
++        IsNonExposedGlobal(cx, JS::GetNonCCWObjectGlobal(obj),
++                           nonExposedGlobals)) {
++      return false;
++    }
++    if (prefIndex != WebIDLPrefIndex::NoPref &&
++        !sWebIDLPrefs[uint16_t(prefIndex)]()) {
++      return false;
++    }
++    if (secureContext && !IsSecureContextOrObjectIsFromSecureContext(cx, obj)) {
++      return false;
++    }
++    if (enabledFunc && !enabledFunc(cx, JS::GetNonCCWObjectGlobal(obj))) {
++      return false;
++    }
++    return true;
++ }
++// INF_PATCH[END]
+\ No newline at end of file
+diff --git a/xpfe/appshell/AppWindow.cpp b/xpfe/appshell/AppWindow.cpp
+--- a/xpfe/appshell/AppWindow.cpp
++++ b/xpfe/appshell/AppWindow.cpp
+@@ -2669,24 +2669,52 @@ void AppWindow::SizeShell() {
+     if (cv) {
+       RefPtr<nsDocShell> docShell = mDocShell;
+       nsCOMPtr<nsIDocShellTreeOwner> treeOwner;
+       docShell->GetTreeOwner(getter_AddRefs(treeOwner));
+       if (treeOwner) {
+         // GetContentSize can fail, so initialise |width| and |height| to be
+         // on the safe side.
+         int32_t width = 0, height = 0;
+-        if (NS_SUCCEEDED(cv->GetContentSize(&width, &height))) {
++
++#ifndef INF_PATCH
++
++    if (NS_SUCCEEDED(cv->GetContentSize(&width, &height))) {
+           treeOwner->SizeShellTo(docShell, width, height);
+           // Update specified size for the final LoadPositionFromXUL call.
+           specWidth = width + windowDiff.width;
+           specHeight = height + windowDiff.height;
++		}
++
++#else
++
++        nsresult rc = cv->GetContentSizeConstrained(1600, 1200, &width, &height);
++
++        if (rc == NS_OK)
++        {
++            // Select our preferred dimensions if content doesn't specify.
++            if (width < 2)
++                width = 1200;
++
++             if (height < 2)  // TODO: Aspect of width, not hardwired.
++                height = 1024;
+         }
++        else
++        {
++           // Couldn't determine dimensions, so select sensible default.
++           width = 1200;
++           height = 1024;
+       }
+-    }
++
++        treeOwner->SizeShellTo(docShell, width, height);
++
++#endif // INF_PATCH
++
++  }
++  }
+   }
+ 
+   // Now that we have set the window's final size, we can re-do its
+   // positioning so that it is properly constrained to the screen.
+   if (positionSet) {
+     LoadPositionFromXUL(specWidth, specHeight);
+   }
+ 
+diff --git a/xpfe/appshell/nsAppShellService.cpp b/xpfe/appshell/nsAppShellService.cpp
+--- a/xpfe/appshell/nsAppShellService.cpp
++++ b/xpfe/appshell/nsAppShellService.cpp
+@@ -53,16 +53,20 @@ using namespace mozilla;
+ using mozilla::dom::BrowsingContext;
+ using mozilla::intl::LocaleService;
+ 
+ // Default URL for the hidden window, can be overridden by a pref on Mac
+ #define DEFAULT_HIDDENWINDOW_URL "resource://gre-resources/hiddenWindow.html"
+ 
+ class nsIAppShell;
+ 
++#ifdef INF_PATCH
++bool _Gecko_OffscreenSharedSurfaceMode();
++#endif
++
+ nsAppShellService::nsAppShellService()
+     : mXPCOMWillShutDown(false),
+       mXPCOMShuttingDown(false),
+       mModalWindowCount(0),
+       mApplicationProvidedHiddenWindow(false),
+       mScreenId(0) {
+   nsCOMPtr<nsIObserverService> obs = services::GetObserverService();
+ 
+@@ -165,18 +169,26 @@ nsAppShellService::CreateTopLevelWindow(
+                                         int32_t aInitialWidth,
+                                         int32_t aInitialHeight,
+                                         nsIAppWindow** aResult) {
+   nsresult rv;
+ 
+   StartupTimeline::RecordOnce(StartupTimeline::CREATE_TOP_LEVEL_WINDOW);
+ 
+   RefPtr<AppWindow> newWindow;
++// INF_PATCH[BEGIN]
+   rv = JustCreateTopWindow(aParent, aUrl, aChromeMask, aInitialWidth,
+-                           aInitialHeight, false, getter_AddRefs(newWindow));
++                           aInitialHeight,  
++#ifdef INF_PATCH
++      _Gecko_OffscreenSharedSurfaceMode(), // Hidden window when embedded
++#endif // INF_PATCH
++
++ getter_AddRefs(newWindow));
++ 
++
+   newWindow.forget(aResult);
+ 
+   if (NS_SUCCEEDED(rv)) {
+     // the addref resulting from this is the owning addref for this window
+     RegisterTopLevelWindow(*aResult);
+     nsCOMPtr<nsIAppWindow> parent;
+     if (aChromeMask & nsIWebBrowserChrome::CHROME_DEPENDENT) parent = aParent;
+     (*aResult)->SetZLevel(CalculateWindowZLevel(parent, aChromeMask));
