@@ -15,6 +15,10 @@ Clone : hg clone https://hg.mozilla.org/mozilla-unified -r 8802d620459d50ea64882
 
 3. Add INF_PATCH define to your mozconfig.
 
+# The following to your mozconfig
+export CFLAGS="-DINF_PATCH=1"
+export CXXFLAGS="-DINF_PATCH=1"
+
 4. Build as normal.
 
 5. Copy mozilla dist/bin directory to [infinity]/programs/mozilla
