@@ -2,7 +2,7 @@
 &lt;>&lt;> infinity 3d web tech public interfaces &amp; examples.
 
 
-Building infinity mozilla/gecko plugin (modified firefox).
+Building mozilla/gecko <><> infinity app (modified firefox).
 
 
 1. Clone version of mozilla we currently target.
