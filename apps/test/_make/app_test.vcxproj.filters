@@ -13,31 +13,22 @@
     <ClCompile Include="..\app_test.cpp">
       <Filter>source</Filter>
     </ClCompile>
-    <ClCompile Include="..\..\core\inf_program.cpp">
-      <Filter>inf_app</Filter>
-    </ClCompile>
-    <ClCompile Include="..\..\core\inf_app.cpp">
-      <Filter>inf_app</Filter>
-    </ClCompile>
-    <ClCompile Include="..\..\base\inf_message.cpp">
+    <ClCompile Include="..\..\..\app_sdk\base\inf_parameters.cpp">
       <Filter>source</Filter>
     </ClCompile>
-    <ClCompile Include="..\..\base\inf_parameters.cpp">
+    <ClCompile Include="..\..\..\app_sdk\base\inf_pipe.cpp">
       <Filter>source</Filter>
     </ClCompile>
-    <ClCompile Include="..\..\base\inf_pipe.cpp">
+    <ClCompile Include="..\..\..\app_sdk\core\inf_app.cpp">
+      <Filter>source</Filter>
+    </ClCompile>
+    <ClCompile Include="..\..\..\app_sdk\core\inf_program.cpp">
       <Filter>source</Filter>
     </ClCompile>
   </ItemGroup>
   <ItemGroup>
-    <ClInclude Include="..\..\core\inf_app.h">
-      <Filter>inf_app</Filter>
-    </ClInclude>
-    <ClInclude Include="..\..\..\base\inf_parameter.h">
-      <Filter>inf_app</Filter>
-    </ClInclude>
-    <ClInclude Include="..\..\core\inf_app_diagnostics.h">
-      <Filter>inf_app</Filter>
-    </ClInclude>
+    <ClInclude Include="..\..\..\app_sdk\base\inf_parameter.h" />
+    <ClInclude Include="..\..\..\app_sdk\core\inf_app.h" />
+    <ClInclude Include="..\..\..\app_sdk\core\inf_app_diagnostics.h" />
   </ItemGroup>
 </Project>
