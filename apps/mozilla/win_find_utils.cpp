@@ -73,11 +73,14 @@ static int _GetDepth(HWND hwnd)
 
 static bool _IsPointInside(HWND hwnd, const POINT &p)
 {
-   if (!hwnd || !/*Win32*/::IsWindow(hwnd))
-   {
-      assert(0);
+   if (!hwnd)
       return false;
-   }
+
+    if (!/*Win32*/::IsWindow(hwnd))
+	{
+		assert(0);
+		return false;
+	}
 
    RECT rect;
 
@@ -134,10 +137,11 @@ static BOOL CALLBACK EnumFindChildProc(HWND hwnd, LPARAM lParam)
 void * _WindowFromPoint(void *wnd, void *_p)
 {
    HWND hwnd = (HWND) wnd;
-   const POINT &p = *((POINT*)_p);
 
    if (!hwnd)
       return nullptr;
+
+   const POINT &p = *((POINT*)_p);
 
    if (!/*Win32*/::IsWindow(hwnd))
    {
@@ -145,7 +149,7 @@ void * _WindowFromPoint(void *wnd, void *_p)
       return nullptr;
    }
 
-   if (!_Gecko_OffscreenSharedSurfaceMode())
+   if (!Gecko_Embed())
       return /*Win32*/::WindowFromPoint(p);
 
    // Find hierarchy root ...

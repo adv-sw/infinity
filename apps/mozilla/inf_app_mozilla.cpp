@@ -6,7 +6,7 @@ File        : inf_app_mozilla.cpp
 
 Description : Infinity / Mozilla/Gecko interop
 
-License : Copyright (c) 2021, Advance Software Limited.
+License : Copyright (c) 2022, Advance Software Limited.
 
 Redistribution and use in source and binary forms, with or without modification are permitted provided that the following conditions are met:
 
@@ -31,22 +31,19 @@ LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF
 
 1. Code tidy & <><> infinity app API refine.
 
-2. Test, ship.
-   2.1 Size page as required (done - first pass, SizeToContent by chrome gets lost on focus change
-      - use ours if further testing shows built in s2c to be insufficient).
+2. SizeToContent refine.
 
-3. Merge to mozilla-central if patch will be accepted.
+3. Patch into WebRender - Compositor11 removed, next version.
 
-4. Patch into WebRender - Compositor11 removed, next version.
+4. Merge to mozilla-central once at tip that which will be accepted.
 
-
-5.  Add support for dynamic content (plugins) : https://bugzilla.mozilla.org/show_bug.cgi?id=651192
-
+5.  Add support for dynamic content (plugins) : https://bugzila.mozilla.org/show_bug.cgi?id=651192
 
 6. Get our NPAPI plugin working with new windowless async shared surface interface.
 
 7. Check whether flash/qt/java plugins support NPAPI async shared surface windowless mode.
 
+8. Mozilla high level rework/optimize as dissussed in chat.mozilla.org
 
 // MOZ_UPGRADE [end]
 
@@ -74,10 +71,40 @@ LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF
 #include "..\..\..\..\mozilla\toolkit\xre\CmdLineAndEnvUtils.h"
 #include "nsIScrollableFrame.h"
 
+
+#include "Z:\dev\mozilla\docshell\base\nsDocShellLoadState.h"
+#include "mozilla/dom/LoadURIOptionsBinding.h"
+#include "mozilla/dom/BrowsingContextGroup.h"
+#include "nsFrameLoader.h"
+#include "Z:\dev\mozilla\dom\ipc\TabContext.h"
+#include "Z:\dev\mozilla\dom\base\BindContext.h"
+#include "nsPIWindowWatcher.h"
+#include "mozilla/dom/XULFrameElement.h"
+#include "nsIBrowserDOMWindow.h"
+#include "nsIDOMChromeWindow.h"
+#include "nsIWindowlessBrowser.h"
+#include "nsIAppWindow.h"
+#include "nsIWebBrowserChrome.h"
+#include "mozIDOMWindow.h"
+#include "mozilla/layers/LayerManager.h"
+#include "BrowserParent.h"
+#include "nsIAppShellService.h"
+#include "nsIWebBrowser.h"
+#include "nsIXULBrowserWindow.h"
+
+#include "mozilla/dom/BrowsingContext.h"
+#include "mozilla/dom/CanonicalBrowsingContext.h"
+
+#include "mozilla/dom/BrowserChild.h"
+
+
 // + <><> Infinity App SDK <><> +
 #include "..\app_sdk\base\inf_version.h"
 #include "..\app_sdk\base\inf_parameter.h"
 #include "..\app_sdk\core\inf_app_diagnostics.h"
+
+static size_t __page_uid = 0;
+
 
 static uint8 _GetWindowTransparency()
 {
@@ -332,39 +359,20 @@ static LRESULT CALLBACK __32769_callback(HWND hWnd, UINT message, WPARAM wParam,
    return 0;
 }
 
-
-static void InitializeSystemPopupOverride()
-{
-   // We need to override the callbacks for these two system window classes, so that
-   // we can prevent system popups from displaying the standard windows cursor.
-
-   HWND tmp = /*Win32*/::CreateWindow(TEXT("ComboLBox"), TEXT("tmp"), WS_POPUP, 0, 0, 0, 0, nullptr, nullptr, GetCurrentModuleHandle(), 0);
-
-   __default_ComboLBox_callback = (WNDPROC) /*Win32*/::GetClassLongPtr(tmp, GCLP_WNDPROC);
-   /*Win32*/::SetClassLongPtr(tmp, GCLP_WNDPROC, (LONG_PTR)__ComboLBox_callback);
-
-   /*Win32*/::DestroyWindow(tmp);
-
-
-   tmp = /*Win32*/::CreateWindow(TEXT("#32769"), TEXT("tmp"), WS_POPUP, 0, 0, 0, 0, nullptr, nullptr, GetCurrentModuleHandle(), 0);
-
-   __default_32769_callback = (WNDPROC) /*Win32*/::GetClassLongPtr(tmp, GCLP_WNDPROC);
-   /*Win32*/::SetClassLongPtr(tmp, GCLP_WNDPROC, (LONG_PTR)__32769_callback);
-
-   /*Win32*/::DestroyWindow(tmp);
-}
-
+#endif // WIN32
 
 
 mozilla::PresShell* Infinity::App_Mozilla::GetPresShell()
 {
-   nsCOMPtr<nsIWebNavigation> webNav(do_GetInterface(m_dom_window_proxy));
-   nsCOMPtr<nsIDocShell> doc_shell(do_QueryInterface(webNav));
+   if (m_full_screen)
+   {
+      auto doc = m_doc_shell->GetDocument();
+      auto fs_doc = doc->GetFullscreenRoot();
+      auto fs_doc_shell = fs_doc ? fs_doc->GetDocShell() : nullptr;
+      if (fs_doc_shell) return fs_doc_shell->GetPresShell();
+   }
 
-   if (doc_shell)
-      return doc_shell->GetPresShell();
-
-   return nullptr;
+   return m_doc_shell ? m_doc_shell->GetPresShell() : nullptr;
 }
 
 
@@ -374,9 +382,8 @@ nsIWidget* GetBaseWidget(mozIDOMWindowProxy *dwp)
 
    if (dwp)
    {
-	  nsCOMPtr<nsIWebNavigation> webNav(do_GetInterface(dwp));
-	  nsCOMPtr<nsIDocShell> ds(do_QueryInterface(webNav));
-	  //NS_ENSURE_STATE(ds);
+ 	   nsCOMPtr<nsIWebNavigation> web_nav(do_GetInterface(dwp));
+	   nsCOMPtr<nsIDocShell> ds(do_QueryInterface(web_nav));
 
       nsCOMPtr<nsIBaseWindow> base_wnd = do_QueryInterface(ds);
       base_wnd->GetParentWidget(&widget);
@@ -385,29 +392,6 @@ nsIWidget* GetBaseWidget(mozIDOMWindowProxy *dwp)
    return widget;
 }
   
-
-//
-//  FUNCTION: BrowserWndProc(HWND, UINT, WRAPAM, LPARAM)
-//
-//  PURPOSE:  Processes messages for the browser container window.
-//
-LRESULT CALLBACK BrowserWndProc(HWND hWnd, UINT message, WPARAM wparam, LPARAM lparam)
-{
-   nsIWebBrowserChrome* chrome = (nsIWebBrowserChrome*)GetWindowLongPtr(hWnd, GWLP_USERDATA);
-
-   switch (message)
-   {
-   case WM_ERASEBKGND:
-      // Reduce flicker by not painting the non-visible background
-      return 1;
-   }
-
-   return DefWindowProc(hWnd, message, wparam, lparam);
-}
-
-
-#endif // WIN32
-
 
 // TODO: Implement like this instead as it permits more flexible accept/reject.
 uint32 App_GetVersion()
@@ -426,10 +410,6 @@ void __stdcall Inf_Progress_Update()
 {
    Msg_Parent(INFINITY_PROGRESS, 0, nullptr, 0);
 }
-
-
-
-// --- [END] Procedural texture plugin interface ---
 
 
 // Constructor
@@ -470,6 +450,7 @@ Infinity::App_Mozilla::App_Mozilla() : Infinity::App()
    m_desired_width = 0;
    m_desired_height = 0;
 
+   m_full_screen = false;
    m_full_redraw_next_frame = false;
 
    m_button_state = 0;
@@ -478,9 +459,9 @@ Infinity::App_Mozilla::App_Mozilla() : Infinity::App()
    m_load_start_time = -1.0f;
    m_load_update = false;
 
+   m_config_listener = nullptr;
 
-   // Experimental
-   m_trigger_full_screen = false;
+   m_doc_shell = nullptr;
 }
 
 
@@ -667,7 +648,7 @@ bool Infinity::App_Mozilla::Resize(uint32 width, uint32 height)
 
    // TODO: Reference Docshell patch on load complete if we need this again.
 
-   uint32 prev_width = m_content_width;
+   uint32 prev_width  = m_content_width;
    uint32 prev_height = m_content_height;
 
    const uint32 WEBPAGE_MIN_WIDTH = 50;
@@ -766,9 +747,8 @@ void Diagnostics_Processing(HWND hroot)
 
 mozilla::dom::Document* GetDocument(void* inf_moz)
 {
-   Infinity::App_Mozilla* mp = (Infinity::App_Mozilla*)inf_moz;
-   mozilla::PresShell* ps = mp->GetPresShell();
-   return ps->GetDocument();
+   auto app_instance = (Infinity::App_Mozilla*) inf_moz;
+   return app_instance->m_doc_shell->GetDocument();
 }
 
 
@@ -779,7 +759,7 @@ void Infinity::App_Mozilla::SetCursorCoordinates(const Vector2& tc)
 }
 
 
-Infinity::uint32 Infinity::App_Mozilla::Async_Update(uint32 flags)
+Infinity::uint32 Infinity::App_Mozilla::Update(uint32 flags)
 {
    if (m_trigger_resize)
    {
@@ -792,8 +772,7 @@ Infinity::uint32 Infinity::App_Mozilla::Async_Update(uint32 flags)
 
    if (!__pending_theme_change.empty())
    {
-      mozilla::PresShell* ps = GetPresShell();
-      mozilla::dom::Document* doc = ps ? ps->GetDocument() : nullptr;
+      auto doc = m_doc_shell->GetDocument();
 
       if (doc)
       {
@@ -819,26 +798,13 @@ Infinity::uint32 Infinity::App_Mozilla::Async_Update(uint32 flags)
       return 0;
 
    // Look for an open java popup ...
-   auto hbrowser = (HWND) GetNativeRoot();
-   auto info = _GetUpdateInfo(hbrowser, false);
+   auto info = _GetUpdateInfo((HWND) GetNativeRoot(), false);
 
    if (info)
    {
       info->m_current_java_popup = Popup_FindOpenJava();
 
       //Log("moz_pt: NO_exclusive_trigger");
-
-      if (info->m_exclusive_trigger)
-      {
-         //Log("moz_pt: exclusive_trigger");
-
-         uint32 enable = (uint32)info->m_exclusive;
-         info->m_exclusive_trigger = false;
-
-         // TODO: Rework this now we're out of process.
-         Infinity::Message* msg = Infinity::CreateMessage(INF_MESSAGE_EXCLUSIVE_REQUEST, enable);
-         MessageParent(msg);
-      }
 
       _ReleaseUpdateInfo(info);
    }
@@ -849,31 +815,19 @@ Infinity::uint32 Infinity::App_Mozilla::Async_Update(uint32 flags)
       m_diagnostics_update_counter = 0;
    }
 
-
-   // Experimental ...
-   if (m_trigger_full_screen)
-   {
-//      if (!m_context->IsLoading())
-      {
-         bool done = SetFullScreen(true);
-
-         if (done)
-            m_trigger_full_screen = false;
-      }
-   }
-
    return 0;
 }
 
 
-void SetOwner(HWND native_window, void* owner)
+void PopupMonitor_Connect(void *native_window, void* owner)
 {
    // TODO: Check if already present & delete.
    //_DestroyUpdateInfo(native_window);
 
    if (native_window)
    {
-      UpdateInfo* info = _CreateUpdateInfo(native_window, owner);
+      // Currently required for popup monitoring.
+      UpdateInfo* info = _CreateUpdateInfo((HWND) native_window, owner);
    }
 }
 
@@ -976,20 +930,6 @@ HWND Infinity::App_Mozilla::Popup_FindOpenJava()
       // a) Modify java source to prevent the call.
       // b) Create a parent process which locks the foreground. [TODO - implement/test].
    }
-
-#ifdef WIN32
-   if (/*Win32*/::IsWindowVisible(hwnd))
-   {
-      if (!__desktop_cursor_zapped)
-      {
-         Infinity::Message* msg = Infinity::CreateMessage(INF_MESSAGE_ZAP_DESKTOP_CURSOR);
-         MessageParent(msg);
-         __desktop_cursor_zapped = true;
-      }
-
-      return hwnd;
-   }
-#endif // WIN32
 
    return nullptr;
 }
@@ -1119,16 +1059,13 @@ void Infinity::App_Mozilla::OnFocusLost()
 {
    if (m_button_state == 0)
    {
-      OnClipboardCommand(Select_None);
+      //OnClipboardCommand(Select_None);
 
       nsFocusManager* fm = nsFocusManager::GetFocusManager();
 
       if (fm && m_dom_window_proxy)
       {
          fm->WindowLowered(m_dom_window_proxy, nsFocusManager::GenerateFocusActionId());
-
-         // DEBUG_FOCUS_1: Used to verify correct focus events received.
-         //Beep(1000,100);
       }
    }
 }
@@ -1143,9 +1080,6 @@ void Infinity::App_Mozilla::OnFocus()
       if (fm && m_dom_window_proxy)
       {
          fm->WindowRaised(m_dom_window_proxy, nsFocusManager::GenerateFocusActionId());
-
-         // DEBUG_FOCUS_2: Used to verify correct focus events received.
-         //Beep(2000,100);
       }
    }
 }
@@ -1155,25 +1089,6 @@ void Infinity::App_Mozilla::Invalidate()
 {
    HWND hbase = (HWND) GetNativeRoot();
    ::PostMessage(hbase, WM_USER, 1, 0xc001f00d);
-}
-
-
-bool Infinity::App_Mozilla::SetFullScreen(bool fs)
-{
-   auto ps = GetPresShell();
-   auto doc = ps ? ps->GetDocument() : nullptr;
-
-   if (doc->GetFullscreenRoot())
-      return true;
-
-   auto elem = ps->GetCanvas();
-
-   static mozilla::ErrorResult rc;
-
-   if (elem)
-      elem->RequestFullscreen(mozilla::dom::CallerType::System, rc);
-
-   return false;
 }
 
 
@@ -1199,7 +1114,7 @@ void Infinity::App_Mozilla::OnButtonDown(uint32 button, uint32 xxflags)
    }
    else if (button == 3)
    {
-      SetExclusiveDisplay(m_inspection_active ^ 1);
+      Request_Display_Exclusive(m_inspection_active ^ 1);
    }
 }
 
@@ -1235,40 +1150,52 @@ void Infinity::App_Mozilla::OnButtonUp(uint32 button)
 }
 
 
-void Infinity::App_Mozilla::SetExclusiveDisplay(bool enable)
+void __cdecl Gecko_Embed_SetFullScreen(void *id, bool full_screen)
 {
-   if (m_inspection_active != enable)
+   if (id)
    {
-      m_inspection_active = enable;
-
-      if (m_inspection_active)
-      {
-         m_inspection_coords = m_cursor_coords;
-
-         // Look for a plugin under the cursor to inspect, if we don't find one,
-         // we'll inspect the entire visible page area.
-
-         // TODO: Support zooming of frames.
-
-#ifdef WIN32
-         m_inspection_window = (HWND)_WindowFromPoint(GetNativeRoot(), (void*)&m_inspection_coords);
-
-         while (m_inspection_window && !_IsDynamic(m_inspection_window))
-         {
-            m_inspection_window = /*Win32*/::GetParent(m_inspection_window);
-         }
-#endif // WIN32
-
-         Exclusive_Request(true);
-      }
-      else
-      {
-         m_inspection_window = nullptr;
-         Exclusive_Request(false);
-      }
-
-      NotifyOwnerOfNativeWindowChange();
+      Infinity::App_Mozilla *app = (Infinity::App_Mozilla*) id;
+      app->Request_Display_Exclusive(full_screen);
    }
+}
+
+
+void Infinity::App_Mozilla::Request_Display_Exclusive(bool enable)
+{
+   Exclusive_Request(enable);
+   m_full_screen = enable;
+}
+
+
+void Infinity::App_Mozilla::Exclusive_Requested(bool enable)
+{
+   nsCOMPtr<nsIDocShellTreeOwner> tree_owner;
+   m_doc_shell->GetTreeOwner(getter_AddRefs(tree_owner));
+   auto chrome_tree_owner = (nsChromeTreeOwner*)tree_owner.get();
+
+   // TODO: Need IPC method to inform the inspected element in its content process.
+   auto app_win = chrome_tree_owner->AppWindow();
+
+   // Send one Restore event over the IPC pipe.
+   if (!enable)
+      app_win->SizeModeChanged(nsSizeMode_Restore);
+
+   // then ensure standard mode so restore isn't echoed multiple times.
+   app_win->SizeModeChanged(enable ? nsSizeMode_Fullscreen : nsSizeMode_Normal);
+}
+
+
+layers::LayerManager *Infinity::App_Mozilla::LayerManager_Get(nsIWidget* wid)
+{
+#if 0
+   if (m_browser_element)
+      return (layers::LayerManager*) m_browser_element->Param_Get(0);
+#else
+      auto ps = GetPresShell();
+
+	   // TODO: Will require rework for ff94+ hence move this version to web render to minimize porting difficulties.
+      return ps ? ps->GetLayerManager() : nullptr;
+#endif
 }
 
 
@@ -1276,20 +1203,11 @@ uint32_t Infinity::App_Mozilla::Update_Consume(nsIWidget* wid)
 {
    if (wid)
       return (uint32_t) wid->GetNativeData(NS_NATIVE_GRAPHIC);
-
-#if 1
-
-   // TODO ff95 upgrade requires WebRender and/or different means of accessing LayerManager as this interface is end of line.
-   
    else
-   {
-      auto ps = GetPresShell();
-
-	   // TODO: Will require rework for ff94+ hence move this version to web render to minimize porting difficulties.
-      mozilla::layers::LayerManager *lm = ps ? ps->GetLayerManager() : nullptr;
-      return (uint32) Compositor_Update_Consume(lm);
+	{
+		layers::LayerManager *lm = LayerManager_Get();
+      return lm ? (uint32) Compositor_Update_Consume(lm) : 0;
    }
-#endif
 
    return 0;
 }
@@ -1405,50 +1323,177 @@ void Infinity::App_Mozilla::Msg_Coords_Screen(HWND hwnd, UINT msg_id, WPARAM wpa
 #endif // WIN32
 
 
-static size_t __page_uid = 0;
+
+#define XUL_EMPTY_PAGE "chrome://global/content/win.xhtml"
+
+// Config_Listener resolves initializing page load of blank chrome.
+NS_IMPL_ISUPPORTS(Config_Listener, nsIWebProgressListener, nsISupportsWeakReference)
+
+
+bool Infinity::App_Mozilla::ContentViewer_Ready()
+{
+    return m_config_listener && m_config_listener->m_complete;
+}
+
 
 bool Infinity::App_Mozilla::NavigateTo(const std::string &addr)
 {
-   MOZ_LOG(sLog_Infinity, mozilla::LogLevel::Warning, ("NavigateTo : %s)", addr.c_str()));
-
-   SetExclusiveDisplay(false);
-
-   std::string _url;
-   FormProperURL(_url, addr);
-   nsCString url(_url.c_str());
-   
-   nsresult rv = NS_OK;
-   nsCOMPtr<nsIWindowWatcher> wwatch(do_GetService(NS_WINDOWWATCHER_CONTRACTID, &rv));
-   nsCString features("chrome,remote"); 
- 
-   // TODO: Browsing history/navigate : A new chrome each navigate will lose history, hence rework for persistance.
-   
-   // Assign unique page name 
-   std::stringstream id;
-   id << "inf_" << __page_uid++;
-   nsCString name(id.str().c_str());
-   
-   rv = wwatch->OpenWindow(nullptr, // mozIDOMWindowProxy* aParent, 
-                            url,
-                            name,
-                            features,
-                            nullptr, // nsISupports* aArguments,
-							getter_AddRefs(m_dom_window_proxy));
-									 
-    
-   Infinity_Log(INF_LOG_DEFAULT, INF_INFO, "NavigateTo : %s", addr.c_str());
-   
-   if (rv != NS_OK)
+   if (!m_dom_window_proxy)
    {
-      Infinity_Log(INF_LOG_DEFAULT, INF_ERROR, rv == NS_ERROR_MALFORMED_URI ? "Malformed URI" : "FAIL");
-   }
+      nsresult rv = NS_OK;
+      nsCOMPtr<nsIWindowWatcher> wwatch(do_GetService(NS_WINDOWWATCHER_CONTRACTID, &rv));
+      nsCString features("chrome"); // TODO: ",remote" - not implemented in current tree. Hence perform Configure_Untrusted below.
+ 
+      // TODO: Browsing history/navigate : A new chrome each navigate will lose history, hence rework for persistance.
    
-   // Bind the chrome to this procedural texture ...
-   auto native_window = (HWND) GetNativeRoot();
+      // Assign unique page name 
+      std::stringstream id;
+      id << "inf_" << __page_uid++;
+      nsCString name(id.str().c_str());
+      nsCString url_start(XUL_EMPTY_PAGE);
+   
+      rv = wwatch->OpenWindow(nullptr, // mozIDOMWindowProxy* aParent, 
+                               url_start,
+                               name,
+                               features,
+                               nullptr, // nsISupports* aArguments,
+							   getter_AddRefs(m_dom_window_proxy));
 
-   SetOwner(native_window, this);
+      return false; // Leave it to initialize.
+   }
 
-   return rv == NS_OK;
+   // Connect up for untrusted content load.
+
+   nsCOMPtr<nsIWebNavigation> web_nav(do_GetInterface(m_dom_window_proxy));
+   nsCOMPtr<nsIDocShell> ds(do_QueryInterface(web_nav));
+	m_doc_shell = ds.get();
+
+
+   // --------------------------------------------------------------------------------
+   nsCOMPtr<nsIDocShellTreeOwner> tree_owner;
+   m_doc_shell->GetTreeOwner(getter_AddRefs(tree_owner));
+   auto chrome_tree_owner = (nsChromeTreeOwner *) tree_owner.get();
+   auto app_win = chrome_tree_owner->AppWindow();
+  
+   // Sanity check - should be ready at this point.
+   assert(app_win && !app_win->IsLocked()); // Can't do anything until chrome has loaded.
+
+   if (app_win)
+      app_win->Embed_SetUserData(this);
+   else
+      return false;
+
+   nsCOMPtr<nsIContentViewer> cv;
+   m_doc_shell->GetContentViewer(getter_AddRefs(cv));
+
+   if (cv) 
+   {
+      RefPtr<dom::Document> doc = cv->GetDocument();
+
+      chrome_tree_owner->SizeShellTo(m_doc_shell, 1200, 1024);
+
+      if (Configure_Untrusted(doc)) // We want to load regular web content.
+      {
+          // Infinity specific bind.
+          PopupMonitor_Connect(GetNativeRoot(), this);
+      }
+
+      std::string _url;
+      FormProperURL(_url, addr);
+      Content_Load(_url);
+
+      // BrowsingContextWebProgress::OnStateChange fired with load progression.
+
+      return true; // Load request completed.
+    }
+
+   return false;
+}
+
+
+void Infinity::App_Mozilla::Content_Load(const std::string &_url)
+{
+    // Ref: js loadContentWindow:
+
+    std::wstring _url_w(_url.begin(), _url.end());
+    nsAutoString url_w(_url_w.c_str());
+
+    mozilla::dom::LoadURIOptions loptions;
+    
+#if 1
+    loptions.mTriggeringPrincipal = nsContentUtils::GetSystemPrincipal();
+#else
+    loptions.mTriggeringPrincipal = BasePrincipal::CreateContentPrincipal(url);
+#endif
+
+/*
+   // JS reference code configures load options like this. TODO: Fix up principal properly.
+
+   let oa = E10SUtils.predictOriginAttributes({
+      browser,
+    });
+    let loadURIOptions = {
+      triggeringPrincipal: principal,
+      remoteType: E10SUtils.getRemoteTypeForURI(
+        url,
+        true,
+        false,
+        E10SUtils.DEFAULT_REMOTE_TYPE,
+        null,
+        oa
+      )
+*/
+
+    RefPtr<nsDocShellLoadState> ls;
+    auto rv = nsDocShellLoadState::CreateFromLoadURIOptions(m_browsing_context, url_w, loptions, getter_AddRefs(ls));
+    m_browsing_context->LoadURI(ls, true); // bool aSetNavigating)
+}
+
+
+bool Infinity::App_Mozilla::Configure_Untrusted(mozilla::dom::Document* doc)
+{
+    if (!m_browser_element)
+    {
+       mozilla::dom::ElementCreationOptionsOrString ec_options;
+       ErrorResult err;
+       nsAutoString tag_id(L"browser");
+       RefPtr<mozilla::dom::Element> element = doc->CreateXULElement(tag_id, ec_options, err);
+       m_browser_element = mozilla::dom::XULFrameElement::FromNode(element);
+
+       {
+         nsAutoString token(L"remote"); nsAutoString value(L"true");
+         m_browser_element->SetAttribute(token, value, err);
+       }
+
+       {
+         nsAutoString token(L"type"); nsAutoString value(L"content");
+         m_browser_element->SetAttribute(token, value, err);
+       }
+
+       // Required for browser element to cover entire widget. 
+       {
+         nsAutoString token(L"style"); nsAutoString value(L"height: 100vh; width: 100vw; border:0");
+         m_browser_element->SetAttribute(token, value, err);
+       }
+
+       {
+         nsAutoString token(L"maychangeremoteness"); nsAutoString value(L"true");
+         m_browser_element->SetAttribute(token, value, err);
+       }
+
+       nsXULElement::Element* doc_elem = doc->GetDocumentElement();
+       doc_elem->AppendChild(*m_browser_element.get(), err);
+
+       // Required bcoz something in browser element style was introducing scrollbars. 
+       // border:0 above may have resolved, but in any case, we never want scrollbars on browser element, so lets make sure.
+       nsContentUtils::SetScrollbarsVisibility(m_doc_shell, false);
+
+       m_browsing_context = m_browser_element->GetBrowsingContext();
+ 
+       return true; // Bind occured.
+    }
+
+    return false; // Nothing done.
 }
 
 
@@ -1482,7 +1527,7 @@ void Infinity::App_Mozilla::GoBack()
          nsresult rv = web_nav->GoBack(false, true);
    }
 
-   SetExclusiveDisplay(false);
+   Request_Display_Exclusive(false);
 }
 
 
@@ -1507,7 +1552,7 @@ void Infinity::App_Mozilla::GoForwards()
          nsresult rv = web_nav->GoForward(false, true);
    }
 
-   SetExclusiveDisplay(false);
+   Request_Display_Exclusive(false);
 }
 
 
@@ -1549,7 +1594,7 @@ void Infinity::App_Mozilla::Reload()
          nsresult rv = web_nav->Reload(nsIWebNavigation::LOAD_FLAGS_NONE);
    }
 
-   SetExclusiveDisplay(false);
+   Request_Display_Exclusive(false);
 }
 
 
@@ -1651,15 +1696,14 @@ void Infinity::App_Mozilla::ScanForDialogs(nsIURI* uri)
 }
 */
 
+#if 0
 void Infinity::App_Mozilla::OnClipboardCommand(Clipboard_Command cmd)
 {
-#if 0
-
    // TODO: Fixup - moz changed.
 
-   if (m_context)
+   if (m_browsing_context)
    {
-      auto ds = m_context->GetDocShell();
+      auto ds = m_browsing_context->GetDocShell();
       mozIDOMWindowProxy* dwp = nullptr;
       ds->GetDomWindow(&dwp);
 
@@ -1691,8 +1735,8 @@ void Infinity::App_Mozilla::OnClipboardCommand(Clipboard_Command cmd)
          break;
       }
    }
-#endif
 }
+#endif
 
 
 float Infinity::App_Mozilla::Percentage_Ready()
@@ -1816,7 +1860,6 @@ void Infinity::App_Mozilla::OnVerticalScroll(float magnitude)
 }
 
 
-
 bool App_Operation(Infinity::uint32 operation_id, std::string& result, char *param_1)
 {
    if (operation_id == INFINITY_APP_THEME_CHANGE)
@@ -1894,8 +1937,6 @@ bool App_Operation(Infinity::uint32 operation_id, std::string& result, char *par
 }
 
 
-bool __inf_modal_dialog = false;
-
 extern mozilla::LazyLogModule sLog_Infinity;
 
 // TODO: Move to header.
@@ -1903,18 +1944,13 @@ extern mozilla::LazyLogModule sLog_Infinity;
 #define FIND_CREATE 1
 #define FIND_REMOVE 2
 
-
 void Parameters_Send(Pipe* p, Cmd_Target t, Cmd_ID cmd_id, ::Parameters* params);
 bool Program_Initialized();
 void Remove(Cmd_Target t);
-extern std::map<size_t, Infinity::App*> __lookup;
-
+extern std::map<Cmd_Target, Infinity::App*> __lookup;
 
 const char* __program_id = "webpage";
-
-// App specific implementation.
-
-// Glue app to infinity procedural texture implementation so we can port easily.
+bool __inf_modal_dialog = false;
 
 bool App_InitializeClass(uint32 version);
 void App_TerminateClass();
@@ -1923,7 +1959,7 @@ bool Program_Init(wchar_t* cmdline);
 Pipe* Program_GetPipe();
 
 
-bool __cdecl Infinity_App_Init()
+bool __cdecl Gecko_App_Init()
 {
    // TODO: Reject incompatible apps - grab this from INF_APP_CONFIG enviironment variable or another after adding said support :)
    //if (Program_GetVersion() != INF_PROGRAM_VERSION)
@@ -1947,38 +1983,6 @@ bool __cdecl Infinity_App_Init()
 #endif // INF_PATCH
 
 
-   // Disabled Java DirectDraw/Direct3D rendering to allow grabbing of its buffer from a Window device context.
-   // No idea if we still need something like this - test status of current Java.
-   //_putenv("_JAVA_OPTIONS=-Dsun.java2d.noddraw=true");
-
-   InitializeSystemPopupOverride();
-
-#if 0
-
-   // Not required now we're running as a modified firefox.
-
-   // Figure out where we are ...
-   char moz_path[MAX_PATH];
-   /*Win32*/::GetModuleFileName(GetCurrentModuleHandle(), moz_path, MAX_PATH);
-
-   char* ptr = strrchr(moz_path, '\\');
-
-   if (ptr)
-      *ptr = '\0';
-
-   // Remember where we were so we can restore known state.
-   char current_dir[_MAX_PATH];
-   /*Win32*/::GetCurrentDirectory(_MAX_PATH, current_dir);
-
-   // Establish state required to load this mozilla version (might be others in the system)
-   char env[_MAX_PATH];
-   sprintf(env, "GRE_HOME=%s", moz_path);
-   _putenv(env);
-
-   /*Win32*/::SetCurrentDirectory(moz_path);
-
-#endif
-
    Infinity_Log(INF_LOG_DEFAULT, INF_INFO, "[%s] Infinity_App_Init : ok.", __program_id);
 
    return true;
@@ -1990,10 +1994,6 @@ bool __running = true;
 void Program_Complete();
 
 
-void __cdecl Infinity_App_Shutdown()
-{
-   Program_Complete();
-}
 
 
 bool Dialog_Processing(Infinity::App_Mozilla *app, size_t t)
@@ -2067,7 +2067,7 @@ bool Dialog_Processing(Infinity::App_Mozilla *app, size_t t)
 }
 
 
-bool __cdecl Infinity_App_Processing(bool &did_work)
+bool __cdecl Gecko_App_Processing(bool &did_work)
 {
    if (!Program_Initialized()) // If not initialized programming error or a child process we don't operate through.
       return true;
@@ -2087,20 +2087,14 @@ bool __cdecl Infinity_App_Processing(bool &did_work)
       if (!app)
          continue;
 
-      app->Async_Update(INF_UPDATE_DISPLAY);
+      app->Update(INF_UPDATE_DISPLAY);
 
       Dialog_Processing(app, t);
 
-      mozilla::PresShell *ps = app->GetPresShell();
+      auto handle = app->Update_Consume(nullptr);
 
-      if (ps)
-      {
-          auto handle = app->Update_Consume(nullptr);
-
-          if (handle)
-             Present(handle, 0.0f, t);
-         
-      }
+      if (handle)
+         Present(handle, 0.0f, t);
    }
 
    return __running;
@@ -2216,6 +2210,14 @@ void __cdecl App_Pause(Cmd_Target t)
 {
    auto app = Infinity::Find(t);
    //assert(app);
+}
+
+
+void App_Exclusive_Requested(Cmd_Target t, bool enable)
+{
+   auto app = Infinity::Find(t);
+   if (app)
+      app->Exclusive_Requested(enable);
 }
 
 

@@ -6,7 +6,7 @@ File        : compositor_status.h
 
 Description : Mozilla Compositor Status
 
-License : Copyright (c) 2021, Advance Software Limited.
+License : Copyright (c) 2022, Advance Software Limited.
 
 Redistribution and use in source and binary forms, with or without modification are permitted provided that the following conditions are met:
 
@@ -33,12 +33,10 @@ public:
    Compositor_Status()
    {
       m_native_destination = nullptr;
-      m_update_available = false;
 	   m_shared_surface_handle = 0;
    }
    void  *m_native_destination;
    HANDLE m_shared_surface_handle;
-   bool   m_update_available;
 };
 
 

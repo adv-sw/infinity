@@ -5,9 +5,9 @@ Project     : <><> Mozilla App
 
 File        : _update_info.h
 
-Description : Gecko -> control application communication interface definition.
+Description : Gecko -> Control Application communications interface.
 
-License : Copyright (c) 2021, Advance Software Limited.
+License : Copyright (c) 2022, Advance Software Limited.
 
 Redistribution and use in source and binary forms, with or without modification are permitted provided that the following conditions are met:
 
@@ -24,19 +24,17 @@ LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF
 
 ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ */
 
-
 #ifndef _UPDATE_INFO_H
 #define _UPDATE_INFO_H
 
 #include <vector>
+#include <mutex>
 
 #pragma warning (disable : 4786)
-
 
 const unsigned int INF_PATCH_GECKO_HWND_DISPLAY_HANDLE_ID = 0;
 const unsigned int INF_PATCH_GECKO_HWND_PRESENT_INFO = 1;
 const unsigned int INF_PATCH_GECKO_HWND_NUM_REQUIRED_DATA_SLOTS = 2;  // Ensure this is always last required index + 1
-
 
 typedef unsigned long uint_32;
 typedef signed long    int_32;
@@ -44,24 +42,24 @@ typedef unsigned char uint_8;
 
 #define MOZ_DXGI_RENDER_TARGET_PIXEL_FORMAT DXGI_FORMAT_B8G8R8A8_UNORM_SRGB
 
-   // Note: DirtyRect shared with [mozilla]layout\base\nsPresShell.cpp
-   // Perform a full moz rebuild if this changes.
+// Note: DirtyRect shared with [mozilla]layout\base\nsPresShell.cpp
+// Perform a full moz rebuild if this changes.
 
-   class Rectangle
+class Rectangle
+{
+   public:
+	Rectangle() : x(0), y(0), width(0), height(0) {}
+   Rectangle(float aX, float aY, float aWidth, float aHeight)
    {
-      public:
-	  Rectangle() : x(0), y(0), width(0), height(0) {}
-      Rectangle(float aX, float aY, float aWidth, float aHeight)
-      {
-         x = aX; y = aY;
-         width = aWidth; height = aHeight;
-      }
+      x = aX; y = aY;
+      width = aWidth; height = aHeight;
+   }
 
-      float x, y;
-      float width, height;
-   };
+   float x, y;
+   float width, height;
+};
 
-   typedef class Rectangle DirtyRect;
+typedef class Rectangle DirtyRect;
 
 
 
@@ -127,7 +125,7 @@ public:
    bool RequiresPopupDraw();
    RemoteDialogInfo *GetRemoteDialogInfo(void *user_data);
 
-    DirtyRect *Get(unsigned int index);
+   DirtyRect *Get(unsigned int index);
 
    std::vector<DirtyRect> m_update_region;
 
@@ -154,43 +152,44 @@ private:
    void Initialize(void *native_root);
 };
 
- UpdateInfo *  _GetUpdateInfo(void *native_window, bool wait_for_access = true);
 
- void  _ReleaseUpdateInfo(UpdateInfo *info);
+UpdateInfo *  _GetUpdateInfo(void *native_window, bool wait_for_access = true);
 
- UpdateInfo *  _CreateUpdateInfo(void *native_window, void *user_data);
- void  _DestroyUpdateInfo(void *native_window);
+void  _ReleaseUpdateInfo(UpdateInfo *info);
 
- void  _MarkDynamic(void *native_window);
- bool  _IsDynamic(void *native_window);
- bool  _IsParentDynamic(void *native_window);
- void  _DebugBreak();
+UpdateInfo *  _CreateUpdateInfo(void *native_window, void *user_data);
+void  _DestroyUpdateInfo(void *native_window);
 
- void  _RegisterUpdateRegion(void *native_wnd);
+void  _MarkDynamic(void *native_window);
+bool  _IsDynamic(void *native_window);
+bool  _IsParentDynamic(void *native_window);
+void  _DebugBreak();
 
- bool AdvSw_GetInterface(void **iface, uint_32 iface_id);
+void  _RegisterUpdateRegion(void *native_wnd);
 
- bool AdvSW_Plugin_Capability_DX9();
+bool AdvSw_GetInterface(void **iface, uint_32 iface_id);
 
- void  UpdateInfo_Configure(uint_32 popup_pixel_format, bool mode_dx9);
+bool AdvSW_Plugin_Capability_DX9();
 
- bool  _UpdateWindow(void *wnd);
- bool  _InvalidateRect(void *wnd, void *rect);
+void  UpdateInfo_Configure(uint_32 popup_pixel_format, bool mode_dx9);
 
- void * _GetFirstVisiblePopup(void *parent);
- void  _PopupHide(void *widget, void *native_owner);
- void  _PopupShow(void *native_widget, void *native_owner, void *moz_widget, uint_32 flags);
+bool  _UpdateWindow(void *wnd);
+bool  _InvalidateRect(void *wnd, void *rect);
+
+void * _GetFirstVisiblePopup(void *parent);
+void  _PopupHide(void *widget, void *native_owner);
+void  _PopupShow(void *native_widget, void *native_owner, void *moz_widget, uint_32 flags);
 
 
- void * _LockPopupInfo(void *native_widget);
- void * _GetPopupData(void *pi, uint_32 id);
- void * _SetPopupData(void *pi, void *data);
- void   _UnlockPopupInfo(void *native_widget);
+void * _LockPopupInfo(void *native_widget);
+void * _GetPopupData(void *pi, uint_32 id);
+void * _SetPopupData(void *pi, void *data);
+void   _UnlockPopupInfo(void *native_widget);
 
- void * _WindowFromPoint(void *wnd, void *point);
- uint_32  _GetMessagePos(void *wnd);
+void * _WindowFromPoint(void *wnd, void *point);
+uint_32  _GetMessagePos(void *wnd);
 
- void  _DiscardUpdate(void *native_owner);
+void  _DiscardUpdate(void *native_owner);
 
 class _ProtectedAccess
 {
@@ -201,13 +200,12 @@ public:
    bool Lock(uint_32 lock_id, bool wait_for_access=true);
    bool Unlock();
 
-   void *m_mutex;
+   std::mutex m_mutex;
 
 #if ENABLE_MUTEX_DIAGNOSTICS
    int_32 m_locked_by;
 #endif
 };
-
 
 
 class PopupInfo : public _ProtectedAccess

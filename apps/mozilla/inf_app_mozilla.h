@@ -5,9 +5,9 @@ Project     : <><> Mozilla App
 
 File        : inf_app_mozilla.h
 
-Description : Mozilla app base definition.
+Description : Mozilla App definition.
 
-License : Copyright (c) 2021, Advance Software Limited.
+License : Copyright (c) 2022, Advance Software Limited.
 
 Redistribution and use in source and binary forms, with or without modification are permitted provided that the following conditions are met:
 
@@ -28,6 +28,7 @@ LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF
 #ifndef INF_MOZILLA_APP_H
 #define INF_MOZILLA_APP_H
 
+
 #ifndef WIN32
 // For now.
 typedef void* HWND;
@@ -42,10 +43,7 @@ typedef bool BOOL;
 
 #pragma warning (disable : 4786)
 
-// Prevent compile issues.
-#define mozilla_ServoStyleConsts_h 1
-#define mozilla_ServoStyleConstsInlines_h 1
-
+// Forward declarations.
 class nsWindow;
 class nsIWebBrowserChrome;
 class nsIPresShell;
@@ -57,11 +55,47 @@ struct IDXGIKeyedMutex;
 struct ID3D11Texture2D;
 struct ID3D11ShaderResourceView;
 
-class App_Mozilla_Private;
 
 #include <mozilla/PresShell.h>
 
 #include "mozilla/dom/BrowsingContext.h"
+
+
+class Config_Listener final : public nsIWebProgressListener, public nsSupportsWeakReference
+{
+public:
+
+   NS_DECL_ISUPPORTS  
+
+   Config_Listener() { m_complete = false; }
+
+   NS_IMETHOD OnStateChange(nsIWebProgress* aProgress, nsIRequest* aRequest, uint32_t aStateFlags, nsresult aStatus) 
+   { 
+      if (aStateFlags & nsIWebProgressListener::STATE_STOP) 
+      {
+         m_complete = true;
+      }
+
+      return NS_OK; 
+   }
+
+   bool m_complete;
+
+   NS_IMETHOD OnProgressChange(nsIWebProgress *aWebProgress, nsIRequest *aRequest, int32_t aCurSelfProgress, int32_t aMaxSelfProgress, int32_t aCurTotalProgress, int32_t aMaxTotalProgress) { return NS_OK; }
+   NS_IMETHOD OnLocationChange(nsIWebProgress *aWebProgress, nsIRequest *aRequest, nsIURI *aLocation, uint32_t aFlags) { return NS_OK; }
+   NS_IMETHOD OnStatusChange(nsIWebProgress *aWebProgress, nsIRequest *aRequest, nsresult aStatus, const char16_t * aMessage) { return NS_OK; }
+   NS_IMETHOD OnSecurityChange(nsIWebProgress *aWebProgress, nsIRequest *aRequest, uint32_t aState) { return NS_OK; }
+   NS_IMETHOD OnContentBlockingEvent(nsIWebProgress *aWebProgress, nsIRequest *aRequest, uint32_t aEvent) { return NS_OK; }
+
+ private:
+   virtual ~Config_Listener() {}
+
+#if !defined(XP_MACOSX)
+   nsCOMPtr<nsIWebProgressListener> mWebProgressListener;
+#endif
+};
+
+
 
 namespace Infinity
 {
@@ -73,10 +107,17 @@ namespace Infinity
       App_Mozilla();
       ~App_Mozilla();
 
+      nsIWindowlessBrowser *Windowless_Create();
+      bool Windowed_Create();
+      void Blank_Configure(nsIDocShell *doc_shell);
+      bool ContentViewer_Ready();
+      bool Configure_Untrusted(mozilla::dom::Document* doc);
+      void Content_Load(const std::string &url);
+      layers::LayerManager *LayerManager_Get(nsIWidget* wid=nullptr);
 
       virtual const std::string& GetClassIdentifier();
 
-      virtual uint32 Async_Update(uint32 flags);
+      virtual uint32 Update(uint32 flags);
 
       virtual void OnCompact(uint32 flags);
       virtual void OnStateChange(uint32 flags);
@@ -93,9 +134,6 @@ namespace Infinity
       virtual void OnCursorLeave();
       virtual void SetCursorCoordinates(const Vector2 &tcoords);
 
-      //virtual void ReadAttributes(Stream &s);
-      //virtual uint32 Write(Stream &s);
-
       virtual void OnStop();
       virtual void OnPrint();
       virtual void GoBack();
@@ -105,12 +143,16 @@ namespace Infinity
       virtual bool ProcessSystemMessage(uint32 msg_id, size_t wparam, size_t lparam);
 
       virtual bool Terminate();
-      virtual void SetExclusiveDisplay(bool enable);
+      
       virtual void SetAspectRatio(float aspect);
 
       virtual float Percentage_Ready();
 
       virtual void OnFilenameChanged();
+      
+      virtual void Request_Display_Exclusive(bool enable);
+      virtual void Exclusive_Requested(bool enable);
+
       void UpdateNavigationState();
 
       void OnLoadBegin();
@@ -120,17 +162,12 @@ namespace Infinity
       void ScanForDuplicates(nsIURI* uri);
       void NotifyOwnerOfNativeWindowChange();
 
-      virtual void OnClipboardCommand(Clipboard_Command cmd);
-
       mozilla::PresShell* GetPresShell();
-      void SetChrome(mozIDOMWindowProxy* c);
-      mozIDOMWindowProxy* GetChrome();
 
       void* GetNativeRoot();
       uint32_t Update_Consume(nsIWidget* wid = nullptr);
 
       void Invalidate();
-      bool SetFullScreen(bool fs);
       bool Resize(uint32 width, uint32 height);
 
       bool m_full_redraw_next_frame;
@@ -153,7 +190,15 @@ namespace Infinity
       bool  m_load_progress_state;
       float m_load_start_time;
 
-      bool m_trigger_full_screen;
+      bool m_full_screen;
+      uint8 m_ignore_revert;
+
+      Config_Listener *m_config_listener;
+      
+      nsIDocShell *m_doc_shell;
+
+      RefPtr<mozilla::dom::XULFrameElement> m_browser_element;
+      RefPtr<mozilla::dom::BrowsingContext> m_browsing_context;
 
       RefPtr<mozIDOMWindowProxy> m_dom_window_proxy;
 

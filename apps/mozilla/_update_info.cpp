@@ -7,7 +7,7 @@ File        : _update_info.cpp
 
 Description : Content -> control application communication implementation.
 
-License : Copyright (c) 2021, Advance Software Limited.
+License : Copyright (c) 2022, Advance Software Limited.
 
 Redistribution and use in source and binary forms, with or without modification are permitted provided that the following conditions are met:
 
@@ -49,7 +49,6 @@ LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF
 #include <D3D11.h>
 
 
-
 using namespace Infinity;
 
 void Inf_Yield()
@@ -58,7 +57,7 @@ void Inf_Yield()
 
 #if !WIN_RT
     // TODO: Re-enable if older equipment with fewer hardware threads requires idle processing time.
-    ///*Win32*/::SwitchToThread();
+    /*Win32*/::SwitchToThread();
 #endif
 
 #else
@@ -93,8 +92,6 @@ typedef std::set<void*> WndSet;
 // TODO: LOAD_BALANCE: Check this
 const uint_32 __mutex_wait_period = 5;
 
-static void *__master_mutex = nullptr;
-
 static Infinity::PixelFormat __popup_pixel_format = DXGI_FORMAT_B8G8R8A8_UNORM;
 
 
@@ -104,126 +101,32 @@ static bool __backend_dx11 = true;
 
 _ProtectedAccess::_ProtectedAccess()
 {
-   m_mutex = nullptr;
-
 #if ENABLE_MUTEX_DIAGNOSTICS
    m_locked_by = -1;
 #endif
-
-   // Initialize master mutex .... should this be a critical section ?
-   if (!__master_mutex)
-   {
-#if defined _WIN32 || defined _WIN64
-      __master_mutex = /*Win32*/::CreateMutexA(nullptr, FALSE, "<!>");
-
-#if ENABLE_MUTEX_DIAGNOSTICS
-         if (!__master_mutex)
-            Log("Could not create master mutex.");
-#endif
-
-#endif
-
-   }
 }
 
 
 _ProtectedAccess::~_ProtectedAccess()
 {
-#if defined _WIN32 || defined _WIN64
-   if (m_mutex)
-      /*Win32*/::CloseHandle(m_mutex);
-#endif
 }
 
 
 bool _ProtectedAccess::Lock(uint_32 lock_id, bool wait_for_access)
 {
 #if MUTEX_ENABLED
-   bool created_n_locked = false;
-
-   if (!m_mutex)
-   {
-
-#if defined _WIN32 || defined _WIN64
-      // Wait for the master mutex ...
-      while (!/*Win32*/::WaitForSingleObject(__master_mutex, __mutex_wait_period) == WAIT_OBJECT_0)
-      {
-         // If we can't get it & we don't need to wait, try later ...
-         if (!wait_for_access)
-            return false;
-
-         Inf_Yield();
-      }
-#endif
-
-
-      if (!m_mutex) // Check again ... another thread could have set this while we were waiting ...
-      {
-         char mutex_id[50];
-
-         for (;;)
-         {
-            // Attempt to create a unique identifier for this mutex.
-            // If the id clashes with an existing one, try again.
-            sprintf(mutex_id, "_updateinfo_mx_%d", rand());
-
-#if defined _WIN32 || defined _WIN64
-            m_mutex = /*Win32*/::CreateMutexA(NULL, TRUE, mutex_id);
-            created_n_locked = true;
-
-            if (/*Win32*/::GetLastError() == ERROR_ALREADY_EXISTS)
-               continue;
-#endif
-
-            break;
-         }
-      }
-
-#if defined _WIN32 || defined _WIN64
-      // Release ownership of the master mutex ...
-      uint_32 rc = /*Win32*/::ReleaseMutex(__master_mutex);
-      // TODO: Should check this error code ...
-#endif
-
-   }
-
-#if ENABLE_MUTEX_DIAGNOSTICS
-  uint_32 counter =0;
-  const uint_32 max_lock_attempts = 50;
-#endif
-
-   if (!created_n_locked)
-   {
-#if defined _WIN32 || defined _WIN64
-      // Request ownership of the mutex ... timeout if we can't get it ...
-      while (!/*Win32*/::WaitForSingleObject(m_mutex, __mutex_wait_period) == WAIT_OBJECT_0)
-      {
-#if ENABLE_MUTEX_DIAGNOSTICS
-         Log("Mutex wait ...  request : %d ", lock_id);
-
-         if (m_locked_by > 1)
-            Log("locked by %d  ", m_locked_by);
-
-         if (++counter > max_lock_attempts)
-            return false;
-#endif
-
-         // If we can't get it, go do something else ...
-         if (!wait_for_access)
-            return false;
-
-         Inf_Yield();
-      }
-#endif
+   if (wait_for_access)
+      m_mutex.lock();
+   else if (!m_mutex.try_lock())
+      return false;
 
 #if ENABLE_MUTEX_DIAGNOSTICS
    m_locked_by = lock_id;
 #endif
-   }
 
 #endif
 
-   return m_mutex != NULL;
+   return true;
 }
 
 
@@ -232,21 +135,7 @@ bool _ProtectedAccess::Unlock()
    uint_32 rc = 1;
 
 #if MUTEX_ENABLED
-   if (m_mutex)
-   {
-#if defined _WIN32 || defined _WIN64
-      uint_32 rc = /*Win32*/::ReleaseMutex(m_mutex);
-#endif
-
-      if (rc == 0)
-      {
-#if ENABLE_MUTEX_DIAGNOSTICS
-         uint_32 error = /*Win32*/::GetLastError();
-
-         Log("UPDATEINFO: Win32 Error (ReleaseMutex,GetLastError=%d", error);
-#endif
-      }
-   }
+   m_mutex.unlock();
 #endif
 
 #if ENABLE_MUTEX_DIAGNOSTICS
@@ -372,15 +261,15 @@ void UpdateInfo::Initialize(void *native_root)
    RECT rect;
    /*Win32*/::GetWindowRect((HWND)native_root, &rect);
 
-   GET_PRIVATE(UpdateInfo)->m_root_offset_x = rect.left;
-   GET_PRIVATE(UpdateInfo)->m_root_offset_y = rect.top;
+   auto uinfo = GET_PRIVATE(UpdateInfo);
+   uinfo->m_root_offset_x = rect.left;
+   uinfo->m_root_offset_y = rect.top;
 #endif
 }
 
 
 UpdateInfo_Private::~UpdateInfo_Private()
 {
-
 }
 
 
@@ -1076,7 +965,7 @@ DirtyRect* UpdateInfo::Get(unsigned int index)
 
  void  _RegisterUpdateRegion(void *native_wnd)
 {
-   if (_Gecko_OffscreenSharedSurfaceMode())
+   if (Gecko_Embed())
    {
       UpdateInfo *info = _GetUpdateInfo(native_wnd, true);
 
