@@ -13,10 +13,10 @@ Building mozilla/gecko <><> infinity app (modified firefox).
             Clone : hg clone https://hg.mozilla.org/mozilla-unified -r 3359a85a2277bbcbcc2b5ebcc425922a23d07f34 mozilla
 
 
-2. Clone this repo & place infinity at same level in your dev hierarchy as the mozilla root delivered by above.
+2. Clone this repo & place infinity at same level in your dev hierarchy as the mozilla root delivered by above in step 1.
 
 
-3. Add INF_PATCH definse to your mozconfig :
+3. Add INF_PATCH defines to your mozconfig :
 
             export CFLAGS="-DINF_PATCH=1"
             export CXXFLAGS="-DINF_PATCH=1"
