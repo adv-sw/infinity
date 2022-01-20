@@ -1,6 +1,7 @@
 # infinity
 &lt;>&lt;> infinity 3d web tech public interfaces &amp; examples.
 
+Platform Support : Windows 10 & above only at this time.
 
 Building mozilla/gecko <><> infinity app (modified firefox).
 
