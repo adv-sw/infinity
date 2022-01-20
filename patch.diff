@@ -1,0 +1,4292 @@
+# HG changeset patch
+# User stevew <steve@advance-software.com>
+# Date 1641132258 0
+#      Sun Jan 02 14:04:18 2022 +0000
+# Node ID 31e519610c76519d460c74f064bea0b6553c987e
+# Parent  3359a85a2277bbcbcc2b5ebcc425922a23d07f34
+INF_PATCH: partial, working, ff.
+
+diff --git a/browser/app/nsBrowserApp.cpp b/browser/app/nsBrowserApp.cpp
+--- a/browser/app/nsBrowserApp.cpp
++++ b/browser/app/nsBrowserApp.cpp
+@@ -196,7 +196,28 @@
+     config.appDataPath = appDataFile;
+   } else {
+     // no -app flag so we use the compiled-in app data
++
++#ifdef INF_PATCH
++   
++    // ... with a twist :)
++    // Prevent clashes with standard firefox profile at runtime so we can run both simultaneously when desired.
++
++    // Duplicate app data as standard version is const & we want to modify it.
++    auto __inf_appdata = new mozilla::StaticXREAppData;
++    memcpy(__inf_appdata, &sAppData, sizeof(mozilla::StaticXREAppData));
++
++    __inf_appdata->vendor = "xMozilla";  // was Mozilla
++    __inf_appdata->name = "xFirefox"; // was Firefox
++    __inf_appdata->remotingName = "firefox"; // Required so sites that check browser ID will function.
++    config.appData = __inf_appdata;
++
++    // __inf_appdata leaks but runtime will clear it up on exit.
++
++#else
+     config.appData = &sAppData;
++
++#endif // INF_PATCH
++
+     config.appDataPath = kDesktopFolder;
+   }
+ 
+diff --git a/browser/app/profile/firefox.js b/browser/app/profile/firefox.js
+--- a/browser/app/profile/firefox.js
++++ b/browser/app/profile/firefox.js
+@@ -2583,3 +2583,6 @@
+ #ifdef NIGHTLY_BUILD
+   pref("extensions.translations.disabled", true);
+ #endif
++
++// INF_PATCH: Currently required to enable access to WebRTC camera, mic
++pref("media.navigator.permission.disabled", true);
+diff --git a/browser/components/BrowserContentHandler.jsm b/browser/components/BrowserContentHandler.jsm
+--- a/browser/components/BrowserContentHandler.jsm
++++ b/browser/components/BrowserContentHandler.jsm
+@@ -219,6 +219,10 @@
+   postData = null,
+   forcePrivate = false
+ ) {
++  // INF_PATCH: Block unwanted content pushes. 
++  let env = Cc["@mozilla.org/process/environment;1"].getService(Ci.nsIEnvironment);
++  if (env.get("MOZ_GECKO_SERVER"))
++    return false;	
+   let chromeURL = AppConstants.BROWSER_CHROME_URL;
+   const isStartup =
+     cmdLine && cmdLine.state == Ci.nsICommandLine.STATE_INITIAL_LAUNCH;
+diff --git a/browser/components/BrowserGlue.jsm b/browser/components/BrowserGlue.jsm
+--- a/browser/components/BrowserGlue.jsm
++++ b/browser/components/BrowserGlue.jsm
+@@ -750,6 +750,12 @@
+ };
+ 
+ (function earlyBlankFirstPaint() {
++  // INF_PATCH[BEGIN]
++  let env = Cc["@mozilla.org/process/environment;1"].getService(Ci.nsIEnvironment);
++  if (env.get("MOZ_GECKO_SERVER"))
++   return;	
++  // INF_PATCH[END] 
++
+   let startTime = Cu.now();
+   if (
+     AppConstants.platform == "macosx" ||
+diff --git a/build/application.ini.in b/build/application.ini.in
+--- a/build/application.ini.in
++++ b/build/application.ini.in
+@@ -39,16 +39,19 @@
+ MinVersion=@GRE_MILESTONE@
+ MaxVersion=@GRE_MILESTONE@
+ 
++; INF_PATCH[BEGIN]
++;: Profile migrator & crash reporter off for now.
++;  TODO: Use config variables rather than hardwire this ini file.
++
+ [XRE]
+-#ifdef MOZ_PROFILE_MIGRATOR
+-EnableProfileMigrator=1
+-#endif
++EnableProfileMigrator=0
+ 
+-#if MOZ_CRASHREPORTER
+ [Crash Reporter]
+-Enabled=1
+-ServerURL=@MOZ_CRASHREPORTER_URL@/submit?id=@MOZ_APP_ID@&version=@MOZ_APP_VERSION@&buildid=@MOZ_BUILDID@
+-#endif
++Enabled=0
++
++; INF_PATCH[END]
++
++
+ 
+ #if MOZ_UPDATER
+ [AppUpdate]
+diff --git a/docshell/base/nsDocShell.cpp b/docshell/base/nsDocShell.cpp
+--- a/docshell/base/nsDocShell.cpp
++++ b/docshell/base/nsDocShell.cpp
+@@ -5607,6 +5607,47 @@
+   return NS_OK;
+ }
+ 
++
++#ifdef INF_PATCH
++
++void SizeToContent(nsIDocShell *docShell)
++{
++   nsCOMPtr<nsIContentViewer> cv;
++   docShell->GetContentViewer(getter_AddRefs(cv));
++
++   if (!cv)
++      return;
++
++   nsCOMPtr<nsIDocShellTreeOwner> treeOwner;
++   docShell->GetTreeOwner(getter_AddRefs(treeOwner));
++
++   if (!treeOwner)
++      return;
++
++   int32_t width = 0, height = 0;
++   nsresult rc = NS_OK; //cv->GetContentSizeConstrained(1600, 1200, &width, &height);
++
++   if (rc == NS_OK)
++   {
++      // Select our preferred dimensions if content doesn't specify.
++      if (width < 2)
++         width = 1200;
++
++      if (height < 2)  // TODO: Aspect of width, not hardwired.
++         height = 1024;
++   }
++   else
++   {
++      // Couldn't determine dimensions, so select sensible default.
++      width = 1200;
++      height = 1024;
++   }
++
++   treeOwner->SizeShellTo(docShell, width, height);
++}
++#endif
++
++
+ NS_IMETHODIMP
+ nsDocShell::OnStateChange(nsIWebProgress* aProgress, nsIRequest* aRequest,
+                           uint32_t aStateFlags, nsresult aStatus) {
+@@ -5656,6 +5697,13 @@
+     // Page has finished loading
+     mBusyFlags = BUSY_FLAGS_NONE;
+ 
++#ifdef INF_PATCH_OFF
++    nsCOMPtr<nsIDocShellTreeOwner> treeOwner;
++    GetTreeOwner(getter_AddRefs(treeOwner));
++    treeOwner->SizeShellTo(this, 1200, 1024);
++    //SizeToContent(this);
++#endif
++
+     // Hide the progress cursor if the pref is set
+     if (StaticPrefs::ui_use_activity_cursor()) {
+       nsCOMPtr<nsIWidget> mainWidget;
+diff --git a/dom/base/Document.cpp b/dom/base/Document.cpp
+--- a/dom/base/Document.cpp
++++ b/dom/base/Document.cpp
+@@ -6212,6 +6212,13 @@
+     return;
+   }
+ 
++ #ifdef INF_PATCH
++  // Mark cookie db as updated so any XSG references can be updated.
++  /*Win32*/ ::SetEnvironmentVariable(TEXT("_INF_COOKIE"), TEXT("1"));
++
++  // TODO: We should do this properly via a "document-set-cookie" observer as implemented below.
++#endif  // INF_PATCH
++
+   nsCOMPtr<nsIObserverService> observerService =
+       mozilla::services::GetObserverService();
+   if (observerService) {
+diff --git a/dom/base/nsGlobalWindowOuter.cpp b/dom/base/nsGlobalWindowOuter.cpp
+--- a/dom/base/nsGlobalWindowOuter.cpp
++++ b/dom/base/nsGlobalWindowOuter.cpp
+@@ -256,6 +256,10 @@
+ #  include "mozilla/dom/SpeechSynthesis.h"
+ #endif
+ 
++#ifdef INF_PATCH
++#include "adv_sw_patch_prompt.h"
++#endif // INF_PATCH
++
+ #ifdef ANDROID
+ #  include <android/log.h>
+ #endif
+@@ -4621,6 +4625,11 @@
+   mForceFullScreenInWidget = true;
+ }
+ 
++
++#ifdef INF_PATCH
++void __cdecl Gecko_SetFullScreen(nsIWidget *wid, bool fs);
++#endif
++
+ bool nsGlobalWindowOuter::SetWidgetFullscreen(FullscreenReason aReason,
+                                               bool aIsFullscreen,
+                                               nsIWidget* aWidget,
+@@ -4649,6 +4658,12 @@
+           // the native system behavior.
+           aWidget->MakeFullScreenWithNativeTransition(aIsFullscreen, aScreen)
+           : aWidget->MakeFullScreen(aIsFullscreen, aScreen);
++
++
++#ifdef INF_PATCH
++   Gecko_SetFullScreen(aWidget, aIsFullscreen);
++#endif
++
+   return NS_SUCCEEDED(rv);
+ }
+ 
+@@ -4962,17 +4977,35 @@
+     MakeMessageWithPrincipal(
+         label, &aSubjectPrincipal, true, "ScriptDialogLabelNullPrincipal",
+         "ScriptDialogLabelContentPrincipal", "ScriptDialogLabelNullPrincipal");
++#ifdef INF_PATCH
++  if (Gecko_Embed())
++     aError = Adv_ModalDialog(this, title, final, nullptr, &result);
++  else
++  {
++#endif // INF_PATCH		  
+ 
+     aError = aAlert
+                  ? prompt->AlertCheck(title.get(), final.get(), label.get(),
+                                       &disallowDialog)
+                  : prompt->ConfirmCheck(title.get(), final.get(), label.get(),
+                                         &disallowDialog, &result);
++#ifdef INF_PATCH
++}
++#endif // INF_PATCH
+ 
+     if (disallowDialog) DisableDialogs();
+   } else {
++#ifdef INF_PATCH
++  if (Gecko_Embed())
++     aError = Adv_ModalDialog(this, title, final, nullptr, &result);
++  else
++  {
++#endif // INF_PATCH
+     aError = aAlert ? prompt->Alert(title.get(), final.get())
+                     : prompt->Confirm(title.get(), final.get(), &result);
++#ifdef INF_PATCH
++  }
++#endif // INF_PATCH
+   }
+ 
+   return result;
+@@ -5060,6 +5093,14 @@
+ 
+   nsAutoSyncOperation sync(mDoc, SyncOperationBehavior::eSuspendInput);
+   bool ok;
++#ifdef INF_PATCH
++  if (Gecko_Embed())
++  {
++      aReturn.Assign(inoutValue);
++      aError = Adv_ModalDialog(this, title, fixedMessage, &aReturn, &ok);
++  }
++  else
++#endif // INF_PATCH
+   aError = prompt->Prompt(title.get(), fixedMessage.get(), &inoutValue,
+                           label.IsVoid() ? nullptr : label.get(),
+                           &disallowDialog, &ok);
+@@ -5643,7 +5684,30 @@
+   }
+ 
+   nsIntSize contentSize;
++
++#ifdef INF_PATCH
++// Sizing also in AppWindow.cpp
++contentSize.width = 0;
++contentSize.height = 0;
++#endif // INF_PATCH
++
+   aError = cv->GetContentSize(&contentSize.width, &contentSize.height);
++
++#ifdef INF_PATCH
++    aError = cv->GetContentSizeConstrained(1600, 1200, &contentSize.width, &contentSize.height);   
++
++   // Select our preferred dimensions if content doesn't specify.
++   if (contentSize.width < 2)
++      contentSize.width = 1200;
++
++   if (contentSize.height < 2)
++      contentSize.height = 1024;
++
++#else
++    aError = cv->GetContentSize(&contentSize.width, &contentSize.height);
++#endif // INF_PATCH
++
++
+   if (aError.Failed()) {
+     return;
+   }
+@@ -7714,3 +7778,7 @@
+       mMarkedCCGeneration(0) {}
+ 
+ nsPIDOMWindowOuter::~nsPIDOMWindowOuter() = default;
++
++#ifdef INF_PATCH
++#include "adv_sw_patch_prompt.cpp"
++#endif // INF_PATCH
+diff --git a/dom/bindings/DOMJSClass.h b/dom/bindings/DOMJSClass.h
+--- a/dom/bindings/DOMJSClass.h
++++ b/dom/bindings/DOMJSClass.h
+@@ -115,24 +115,8 @@
+ }  // namespace GlobalNames
+ 
+ struct PrefableDisablers {
+-  inline bool isEnabled(JSContext* cx, JS::Handle<JSObject*> obj) const {
+-    if (nonExposedGlobals &&
+-        IsNonExposedGlobal(cx, JS::GetNonCCWObjectGlobal(obj),
+-                           nonExposedGlobals)) {
+-      return false;
+-    }
+-    if (prefIndex != WebIDLPrefIndex::NoPref &&
+-        !sWebIDLPrefs[uint16_t(prefIndex)]()) {
+-      return false;
+-    }
+-    if (secureContext && !IsSecureContextOrObjectIsFromSecureContext(cx, obj)) {
+-      return false;
+-    }
+-    if (enabledFunc && !enabledFunc(cx, JS::GetNonCCWObjectGlobal(obj))) {
+-      return false;
+-    }
+-    return true;
+-  }
++  // INF_PATCH: Moved to xptinfo.cpp so we can experiment without full rebuild each tweak.
++  bool isEnabled(JSContext* cx, JS::Handle<JSObject*> obj) const;
+ 
+   // Index into the array of StaticPrefs
+   const WebIDLPrefIndex prefIndex;
+diff --git a/dom/ipc/ContentParent.cpp b/dom/ipc/ContentParent.cpp
+--- a/dom/ipc/ContentParent.cpp
++++ b/dom/ipc/ContentParent.cpp
+@@ -1340,6 +1340,12 @@
+ bool ContentParent::ValidatePrincipal(
+     nsIPrincipal* aPrincipal,
+     const EnumSet<ValidatePrincipalOptions>& aOptions) {
++
++#ifdef INF_PATCH
++   // Don't care for now.
++   return true;
++#endif
++
+   // If the pref says we should not validate, then there is nothing to do
+   if (!StaticPrefs::dom_security_enforceIPCBasedPrincipalVetting()) {
+     return true;
+diff --git a/dom/xul/XULFrameElement.cpp b/dom/xul/XULFrameElement.cpp
+--- a/dom/xul/XULFrameElement.cpp
++++ b/dom/xul/XULFrameElement.cpp
+@@ -15,6 +15,12 @@
+ #include "mozilla/dom/XULFrameElement.h"
+ #include "mozilla/dom/XULFrameElementBinding.h"
+ 
++#ifdef INF_PATCH
++// Patch to access LayerManager from XUL frame element requires BrowserParent
++#include "base/basictypes.h"
++#include "mozilla/dom/BrowserParent.h"
++#endif
++
+ namespace mozilla {
+ namespace dom {
+ 
+@@ -88,6 +94,33 @@
+   mOpenWindowInfo = aInfo;
+ }
+ 
++
++#ifdef INF_PATCH
++
++void *XULFrameElement::Param_Get(uint32_t param_id)
++{
++   if (param_id == 0)
++   {
++      RefPtr<nsFrameLoader> frameLoader = GetFrameLoader();
++   
++      if (frameLoader)
++      {
++         auto bp = frameLoader->GetBrowserParent();
++
++         if (Element* element = bp->GetOwnerElement()) 
++         {
++            if (RefPtr<layers::LayerManager> lm = nsContentUtils::LayerManagerForContent(element))
++               return (void*) lm.get();
++         }  
++      }
++   }
++
++   return nullptr;
++}
++
++#endif // INF_PATCH
++
++
+ void XULFrameElement::LoadSrc() {
+   if (!IsInUncomposedDoc() || !OwnerDoc()->GetRootElement()) {
+     return;
+diff --git a/dom/xul/XULFrameElement.h b/dom/xul/XULFrameElement.h
+--- a/dom/xul/XULFrameElement.h
++++ b/dom/xul/XULFrameElement.h
+@@ -52,6 +52,9 @@
+   void SwapFrameLoaders(nsFrameLoaderOwner* aOtherLoaderOwner,
+                         mozilla::ErrorResult& rv);
+ 
++  // INF_PATCH
++  void *Param_Get(uint32_t parm_id);
++
+   // nsIContent
+   virtual nsresult BindToTree(BindContext&, nsINode& aParent) override;
+   virtual void UnbindFromTree(bool aNullParent) override;
+diff --git a/gfx/layers/LayerManager.h b/gfx/layers/LayerManager.h
+--- a/gfx/layers/LayerManager.h
++++ b/gfx/layers/LayerManager.h
+@@ -209,6 +209,10 @@
+  public:
+   LayerManager();
+ 
++#ifdef INF_PATCH
++  virtual void OnPopupClose() {} 
++#endif // INF_PATCH
++
+   /**
+    * Release layers and resources held by this layer manager, and mark
+    * it as destroyed.  Should do any cleanup necessary in preparation
+@@ -218,6 +222,7 @@
+   virtual void Destroy();
+   bool IsDestroyed() { return mDestroyed; }
+ 
++
+   virtual ShadowLayerForwarder* AsShadowForwarder() { return nullptr; }
+ 
+   virtual KnowsCompositor* AsKnowsCompositor() { return nullptr; }
+diff --git a/gfx/layers/client/ClientLayerManager.cpp b/gfx/layers/client/ClientLayerManager.cpp
+--- a/gfx/layers/client/ClientLayerManager.cpp
++++ b/gfx/layers/client/ClientLayerManager.cpp
+@@ -67,6 +67,7 @@
+       mPaintSequenceNumber(0),
+       mForwarder(new ShadowLayerForwarder(this)) {
+   MOZ_COUNT_CTOR(ClientLayerManager);
++  
+   mMemoryPressureObserver = MemoryPressureObserver::Create(this);
+ }
+ 
+@@ -895,3 +896,25 @@
+ 
+ }  // namespace layers
+ }  // namespace mozilla
++
++#ifdef INF_PATCH
++
++#include "mozilla/widget/CompositorWidgetChild.h"
++
++void mozilla::layers::ClientLayerManager::SetCompositorWidgetChild(void* cwc) {
++  mCompWidget = cwc;
++}
++
++XPCOM_API(void*) Compositor_Update_Consume(mozilla::layers::LayerManager* lm) {
++  auto clm = lm->AsClientLayerManager();
++
++  if (clm && clm->mCompWidget) 
++  {
++		auto cwd = (mozilla::widget::CompositorWidgetDelegate*) clm->mCompWidget;
++		return (void*) cwd->Surface_Pop();
++  }
++
++  return nullptr;
++}
++
++#endif  // INF_PATCH
+\ No newline at end of file
+diff --git a/gfx/layers/client/ClientLayerManager.h b/gfx/layers/client/ClientLayerManager.h
+--- a/gfx/layers/client/ClientLayerManager.h
++++ b/gfx/layers/client/ClientLayerManager.h
+@@ -73,6 +73,12 @@
+   virtual ~ClientLayerManager();
+ 
+  public:
++
++#ifdef INF_PATCH
++  void SetCompositorWidgetChild(void* cwc);
++  void* mCompWidget;
++#endif // INF_PATCH
++
+   ShadowLayerForwarder* AsShadowForwarder() override { return mForwarder; }
+ 
+   KnowsCompositor* AsKnowsCompositor() override { return mForwarder; }
+diff --git a/gfx/layers/d3d11/CompositorD3D11.cpp b/gfx/layers/d3d11/CompositorD3D11.cpp
+--- a/gfx/layers/d3d11/CompositorD3D11.cpp
++++ b/gfx/layers/d3d11/CompositorD3D11.cpp
+@@ -41,6 +41,17 @@
+ #include <versionhelpers.h>  // For IsWindows8OrGreater
+ #include <winsdkver.h>
+ 
++#ifdef INF_PATCH
++
++bool Gecko_Embed();
++void _cdecl Infinity_Log(size_t id, const char *format, ...);
++
++#include "../../../widget/windows/CompositorWidgetParent.h"
++const UINT64 __shared_surface_access_key = 1;
++
++#endif // INF_PATCH
++
++
+ namespace mozilla {
+ 
+ using namespace gfx;
+diff --git a/gfx/layers/d3d11/CompositorD3D11.h b/gfx/layers/d3d11/CompositorD3D11.h
+--- a/gfx/layers/d3d11/CompositorD3D11.h
++++ b/gfx/layers/d3d11/CompositorD3D11.h
+@@ -15,6 +15,10 @@
+ #include <dxgi1_2.h>
+ #include "ShaderDefinitionsD3D11.h"
+ 
++#ifdef INF_PATCH
++#include "compositor_status.h"
++#endif // INF_PATCH
++
+ class nsWidget;
+ 
+ namespace mozilla {
+@@ -285,6 +289,13 @@
+   bool mAllowFrameRecording;
+ 
+   bool mUseForSoftwareWebRender;
++
++#ifdef INF_PATCH
++public:
++   IDXGIKeyedMutex *m_producer_mutex;
++   bool m_dimensions_changed;
++   Compositor_Status m_status;
++#endif // INF_PATCH
+ };
+ 
+ namespace TexSlot {
+diff --git a/gfx/src/nsFont.h b/gfx/src/nsFont.h
+--- a/gfx/src/nsFont.h
++++ b/gfx/src/nsFont.h
+@@ -18,6 +18,13 @@
+ struct gfxFontFeature;
+ struct gfxFontStyle;
+ 
++#ifdef INF_PATCH
++// Required to include from embedded apps.
++#ifdef INFINITY_PLUGIN_EXPORTS
++class nsSubstring;
++#endif // INFINITY_PLUGIN_EXPORTS
++#endif // INF_PATCH
++
+ // Font structure.
+ struct nsFont final {
+   typedef mozilla::FontStretch FontStretch;
+diff --git a/gfx/thebes/DeviceManagerDx.cpp b/gfx/thebes/DeviceManagerDx.cpp
+--- a/gfx/thebes/DeviceManagerDx.cpp
++++ b/gfx/thebes/DeviceManagerDx.cpp
+@@ -36,12 +36,18 @@
+ #include <dcomp.h>
+ #include <ddraw.h>
+ 
++
++#ifdef INF_PATCH
++bool Gecko_Embed();
++#endif
++
+ namespace mozilla {
+ namespace gfx {
+ 
+ using namespace mozilla::widget;
+ using namespace mozilla::layers;
+ 
++
+ StaticAutoPtr<DeviceManagerDx> DeviceManagerDx::sInstance;
+ 
+ // We don't have access to the D3D11CreateDevice type in gfxWindowsPlatform.h,
+diff --git a/gfx/thebes/gfxWindowsPlatform.cpp b/gfx/thebes/gfxWindowsPlatform.cpp
+--- a/gfx/thebes/gfxWindowsPlatform.cpp
++++ b/gfx/thebes/gfxWindowsPlatform.cpp
+@@ -92,6 +92,11 @@
+ using namespace mozilla::image;
+ using namespace mozilla::unicode;
+ 
++#ifdef INF_PATCH
++bool Gecko_Embed();
++void _cdecl Infinity_Log(size_t id, const char *format, ...);
++#endif
++
+ DCForMetrics::DCForMetrics() {
+   // Get the whole screen DC:
+   mDC = GetDC(nullptr);
+diff --git a/ipc/glue/MessagePump.cpp b/ipc/glue/MessagePump.cpp
+--- a/ipc/glue/MessagePump.cpp
++++ b/ipc/glue/MessagePump.cpp
+@@ -24,6 +24,11 @@
+ #include "nsXULAppAPI.h"
+ #include "prthread.h"
+ 
++#ifdef INF_PATCH
++bool __cdecl Gecko_App_Processing(bool &did_work);
++bool Gecko_Embed();
++#endif
++
+ using base::TimeTicks;
+ using namespace mozilla::ipc;
+ 
+diff --git a/ipc/glue/WindowsMessageLoop.cpp b/ipc/glue/WindowsMessageLoop.cpp
+--- a/ipc/glue/WindowsMessageLoop.cpp
++++ b/ipc/glue/WindowsMessageLoop.cpp
+@@ -27,6 +27,11 @@
+ using namespace mozilla::ipc;
+ using namespace mozilla::ipc::windows;
+ 
++#ifdef INF_PATCH
++#include "_update_info.h"
++#include "adv_sw_patch.h"
++#endif // INF_PATCH
++
+ /**
+  * The Windows-only code below exists to solve a general problem with deadlocks
+  * that we experience when sending synchronous IPC messages to processes that
+diff --git a/js/src/jsapi.cpp b/js/src/jsapi.cpp
+--- a/js/src/jsapi.cpp
++++ b/js/src/jsapi.cpp
+@@ -132,6 +132,12 @@
+ using JS::ReadOnlyCompileOptions;
+ using JS::SourceText;
+ 
++#ifdef INF_PATCH
++// TODO: Remove this workaround when a solution is implemented in the trunk.
++// https://bugzilla.mozilla.org/show_bug.cgi?id=737611
++static int __js_rt_instance_count = 0;
++#endif // INF_PATCH
++
+ #ifdef HAVE_VA_LIST_AS_ARRAY
+ #  define JS_ADDRESSOF_VA_LIST(ap) ((va_list*)(ap))
+ #else
+@@ -402,10 +408,24 @@
+     parentRuntime = parentRuntime->parentRuntime;
+   }
+ 
++#ifdef INF_PATCH
++    __js_rt_instance_count++;
++#endif // INF_PATCH
++
++
+   return NewContext(maxbytes, parentRuntime);
+ }
+ 
+-JS_PUBLIC_API void JS_DestroyContext(JSContext* cx) { DestroyContext(cx); }
++JS_PUBLIC_API void JS_DestroyContext(JSContext* cx) 
++{ 
++
++DestroyContext(cx); 
++
++#ifdef INF_PATCH
++    __js_rt_instance_count--;
++#endif // INF_PATCH
++
++}
+ 
+ JS_PUBLIC_API void* JS_GetContextPrivate(JSContext* cx) { return cx->data; }
+ 
+diff --git a/layout/base/PresShell.cpp b/layout/base/PresShell.cpp
+--- a/layout/base/PresShell.cpp
++++ b/layout/base/PresShell.cpp
+@@ -858,9 +858,19 @@
+   mReflowCountMgr->SetPresContext(mPresContext);
+   mReflowCountMgr->SetPresShell(this);
+ #endif
++
+   mLastOSWake = mLoadBegin = TimeStamp::Now();
+ }
+ 
++ #ifdef INF_PATCH
++mozilla::dom::Element* PresShell::GetCanvas() 
++{
++  auto cf = (nsCanvasFrame*) GetCanvasFrame();
++  return cf ? cf->GetCustomContentContainer() : nullptr;
++}
++#endif // INF_PATCH
++
++
+ NS_INTERFACE_TABLE_HEAD(PresShell)
+   NS_INTERFACE_TABLE_BEGIN
+     // In most cases, PresShell should be treated as concrete class, but need to
+diff --git a/layout/base/PresShell.h b/layout/base/PresShell.h
+--- a/layout/base/PresShell.h
++++ b/layout/base/PresShell.h
+@@ -2927,6 +2927,12 @@
+   // in visual coordinates. It is set to (NS_UNCONSTRAINEDSIZE,
+   // NS_UNCONSTRAINEDSIZE) if the mouse isn't over our window or there is no
+   // last observed mouse location for some reason.
++
++#ifdef INF_PATCH
++public:
++  mozilla::dom::Element* GetCanvas();
++#endif // INF_PATCH
++
+   nsPoint mMouseLocation;
+   // This is an APZ state variable that tracks the target guid for the last
+   // mouse event that was processed (corresponding to mMouseLocation). This is
+diff --git a/layout/base/nsPresContext.cpp b/layout/base/nsPresContext.cpp
+--- a/layout/base/nsPresContext.cpp
++++ b/layout/base/nsPresContext.cpp
+@@ -2136,6 +2136,7 @@
+ 
+ void nsPresContext::NotifyDidPaintForSubtree(
+     TransactionId aTransactionId, const mozilla::TimeStamp& aTimeStamp) {
++
+   if (mFirstContentfulPaintTransactionId && !mHadContentfulPaintComposite) {
+     if (aTransactionId >= *mFirstContentfulPaintTransactionId) {
+       mHadContentfulPaintComposite = true;
+diff --git a/layout/base/nsRefreshDriver.cpp b/layout/base/nsRefreshDriver.cpp
+--- a/layout/base/nsRefreshDriver.cpp
++++ b/layout/base/nsRefreshDriver.cpp
+@@ -2068,6 +2068,7 @@
+   return CallState::Continue;
+ }
+ 
++
+ void nsRefreshDriver::Tick(VsyncId aId, TimeStamp aNowTime,
+                            IsExtraTick aIsExtraTick /* = No */) {
+   MOZ_ASSERT(!nsContentUtils::GetCurrentJSContext(),
+diff --git a/layout/generic/nsGfxScrollFrame.cpp b/layout/generic/nsGfxScrollFrame.cpp
+--- a/layout/generic/nsGfxScrollFrame.cpp
++++ b/layout/generic/nsGfxScrollFrame.cpp
+@@ -2735,6 +2735,11 @@
+   ResetDisplayPortExpiryTimer();
+ }
+ 
++#ifdef INF_PATCH
++#include "_update_info.h"
++#include "adv_sw_patch.h"
++#endif // INF_PATCH
++
+ void ScrollFrameHelper::ScrollVisual() {
+   MarkEverScrolled();
+ 
+diff --git a/modules/libpref/Preferences.cpp b/modules/libpref/Preferences.cpp
+--- a/modules/libpref/Preferences.cpp
++++ b/modules/libpref/Preferences.cpp
+@@ -3640,6 +3640,13 @@
+ /* static */
+ void Preferences::FinishInitializingUserPrefs() {
+   sPreferences->NotifyServiceObservers(NS_PREFSERVICE_READ_TOPIC_ID);
++
++#ifdef INF_PATCH_OFF 
++  // This was tripping a terminate following our removal of standard ffox chrome window.
++  // Workaround is to remove it so we can freeform design our interface.
++  // TODO: Still required ?
++  sPreferences->ClearUser("sanity-test.version");
++#endif // INF_PATCH
+ }
+ 
+ NS_IMETHODIMP
+diff --git a/netwerk/base/nsNetUtil.h b/netwerk/base/nsNetUtil.h
+--- a/netwerk/base/nsNetUtil.h
++++ b/netwerk/base/nsNetUtil.h
+@@ -95,7 +95,12 @@
+                    mozilla::NotNull<const mozilla::Encoding*> encoding,
+                    nsIURI* baseURI = nullptr);
+ 
+-nsresult NS_NewURI(nsIURI** result, const char* spec,
++#ifdef INF_PATCH
++XPCOM_API(nsresult) 
++#else
++nsresult
++#endif // INF_PATCH
++NS_NewURI(nsIURI** result, const char* spec,
+                    nsIURI* baseURI = nullptr);
+ 
+ nsresult NS_NewFileURI(
+diff --git a/netwerk/base/nsStandardURL.cpp b/netwerk/base/nsStandardURL.cpp
+--- a/netwerk/base/nsStandardURL.cpp
++++ b/netwerk/base/nsStandardURL.cpp
+@@ -199,6 +199,9 @@
+ // nsStandardURL <public>
+ //----------------------------------------------------------------------------
+ 
++// INF_PATCH: Don't care - more important stuff to worry about.
++#undef DEBUG_DUMP_URLS_AT_SHUTDOWN
++
+ #ifdef DEBUG_DUMP_URLS_AT_SHUTDOWN
+ static StaticMutex gAllURLsMutex;
+ static LinkedList<nsStandardURL> gAllURLs;
+diff --git a/toolkit/components/backgroundhangmonitor/BackgroundHangMonitor.cpp b/toolkit/components/backgroundhangmonitor/BackgroundHangMonitor.cpp
+--- a/toolkit/components/backgroundhangmonitor/BackgroundHangMonitor.cpp
++++ b/toolkit/components/backgroundhangmonitor/BackgroundHangMonitor.cpp
+@@ -34,6 +34,9 @@
+ 
+ #include <algorithm>
+ 
++// INF_PATCH
++#undef MOZ_ENABLE_BACKGROUND_HANG_MONITOR
++
+ // Activate BHR only for one every BHR_BETA_MOD users.
+ // We're doing experimentation with collecting a lot more data from BHR, and
+ // don't want to enable it for beta users at the moment. We can scale this up in
+diff --git a/toolkit/components/remote/nsWinRemoteServer.cpp b/toolkit/components/remote/nsWinRemoteServer.cpp
+--- a/toolkit/components/remote/nsWinRemoteServer.cpp
++++ b/toolkit/components/remote/nsWinRemoteServer.cpp
+@@ -20,7 +20,8 @@
+ #include "nsIDocShell.h"
+ #include "WinRemoteMessage.h"
+ 
+-HWND hwndForDOMWindow(mozIDOMWindowProxy* window) {
++// INF_PATCH
++XPCOM_API(HWND) hwndForDOMWindow(mozIDOMWindowProxy* window) {
+   if (!window) {
+     return 0;
+   }
+diff --git a/toolkit/components/windowwatcher/nsWindowWatcher.cpp b/toolkit/components/windowwatcher/nsWindowWatcher.cpp
+--- a/toolkit/components/windowwatcher/nsWindowWatcher.cpp
++++ b/toolkit/components/windowwatcher/nsWindowWatcher.cpp
+@@ -282,6 +282,15 @@
+                             const nsACString& aFeatures,
+                             nsISupports* aArguments,
+                             mozIDOMWindowProxy** aResult) {
++
++#if INF_PATCH_OFF
++   // Block all js windows for now.
++   auto pos = aName.FindChar('i'); // will have to do for now.  TODO: check inf_ (no strncmp equivalent so char by char).
++  
++   if (pos != 0)
++      return NS_ERROR_FAILURE; //NS_OK; NS_ERROR_UNEXPECTED
++#endif
++
+   nsCOMPtr<nsIArray> argv = ConvertArgsToArray(aArguments);
+ 
+   uint32_t argc = 0;
+diff --git a/toolkit/crashreporter/mozwer/mozwer.cpp b/toolkit/crashreporter/mozwer/mozwer.cpp
+--- a/toolkit/crashreporter/mozwer/mozwer.cpp
++++ b/toolkit/crashreporter/mozwer/mozwer.cpp
+@@ -4,6 +4,13 @@
+ 
+ #include <windows.h>
+ 
++
++#ifdef INF_PATCH
++// BCryptGenRandom unresolved without this.
++#pragma comment(lib, "Bcrypt.lib") 
++#endif
++
++
+ #include "nscore.h"
+ 
+ extern "C" {
+diff --git a/toolkit/xre/nsAppRunner.cpp b/toolkit/xre/nsAppRunner.cpp
+--- a/toolkit/xre/nsAppRunner.cpp
++++ b/toolkit/xre/nsAppRunner.cpp
+@@ -248,6 +248,20 @@
+ #  include "nsIStringBundle.h"
+ #endif
+ 
++#ifdef INF_PATCH
++#include "..\..\..\infinity\app_sdk\core\inf_app_diagnostics.h"
++bool __cdecl Gecko_App_Init();
++void __cdecl Program_Complete();
++void _cdecl Program_Terminate();
++bool __gecko_app = false;
++
++// BCryptGenRandom unresolved without this.
++#pragma comment(lib, "Bcrypt.lib") 
++// TODO: Remove from mozwer.cpp - better here as works with old version too.
++
++#endif // INF_PATCH
++
++
+ extern uint32_t gRestartMode;
+ extern void InstallSignalHandlers(const char* ProgramName);
+ 
+@@ -4004,6 +4018,26 @@
+     return 0;
+   }
+ 
++#ifdef INF_PATCH
++
++  if (XRE_IsParentProcess())
++  {
++     if (CheckArg("infinity"))
++     {
++        Infinity_Log(INF_LOG_DEFAULT, INF_INFO, "<><> Gecko Server.");
++        __gecko_app = true;
++     }
++     
++     if (__gecko_app)
++     {
++        Gecko_App_Init();
++     }
++     else
++        Infinity_Log(INF_LOG_DEFAULT, INF_ERROR, "*** Unexpected gecko root process.");
++  }
++
++#endif // INF_PATCH
++
+   rv = XRE_InitCommandLine(gArgc, gArgv);
+   NS_ENSURE_SUCCESS(rv, 1);
+ 
+@@ -4677,6 +4711,8 @@
+   MOZ_RELEASE_ASSERT(!cachesOK || lastVersion.Equals(version),
+                      "Caches cannot be good if the version has changed.");
+ 
++#ifndef INF_PATCH
++  // Disabled as causing lockup.
+ #ifdef MOZ_BLOCK_PROFILE_DOWNGRADE
+   // The argument check must come first so the argument is always removed from
+   // the command line regardless of whether this is a downgrade or not.
+@@ -4689,6 +4725,7 @@
+     }
+   }
+ #endif
++#endif // INF_PATCH
+ 
+   rv = mDirProvider.SetProfile(mProfD, mProfLD);
+   NS_ENSURE_SUCCESS(rv, 1);
+@@ -5253,6 +5290,12 @@
+     }
+   }
+ 
++ #ifdef INF_PATCH
++  // Ensure gecko shuts down properly.
++  bool userAllowedQuit = false;
++  appStartup->Quit(nsIAppStartup::eAttemptQuit, 0, &userAllowedQuit);
++#endif // INF_PATCH
++
+   return rv;
+ }
+ 
+@@ -5491,12 +5534,24 @@
+   XREMain main;
+ 
+   int result = main.XRE_main(argc, argv, aConfig);
++
++#ifdef INF_PATCH
++  if (__gecko_app)
++      Program_Complete();
++#endif // INF_PATCH
++
+   mozilla::RecordShutdownEndTimeStamp();
+ #ifdef MOZ_BACKGROUNDTASKS
+   // This is well after the profile has been unlocked, so it's okay if this does
+   // delete this background task's temporary profile.
+   mozilla::BackgroundTasks::Shutdown();
+ #endif
++
++#ifdef INF_PATCH
++  if (__gecko_app)
++     Program_Terminate();
++#endif // INF_PATCH
++
+   return result;
+ }
+ 
+@@ -5734,3 +5789,25 @@
+   __sanitizer_set_report_path(nspath.get());
+ }
+ #endif
++
++
++#ifdef INF_PATCH
++
++#include <nsIWebNavigation.h>
++#include "../../xpfe/appshell/AppWindow.h"
++#include "../../xpfe/appshell/nsChromeTreeOwner.h"
++
++// + <><> Infinity App SDK <><> +
++#include "..\..\..\infinity\app_sdk\base\inf_parameters.cpp"
++#include "..\..\..\infinity\app_sdk\base\inf_pipe.cpp"
++#include "..\..\..\infinity\app_sdk\core\inf_app.cpp"
++#include "..\..\..\infinity\app_sdk\core\inf_program.cpp"
++
++// + <><> Infinity Mozilla App implementation <><> +
++#include "..\..\..\infinity\apps\mozilla\_update_info.cpp"
++#include "..\..\..\infinity\apps\mozilla\adv_sw_base_window.cpp"
++#include "..\..\..\infinity\apps\mozilla\adv_sw_ns_document_viewer_patch.cpp"
++#include "..\..\..\infinity\apps\mozilla\win_find_utils.cpp"
++#include "..\..\..\infinity\apps\mozilla\inf_app_mozilla.cpp"
++
++#endif // INF_PATCH
+diff --git a/widget/CompositorWidget.h b/widget/CompositorWidget.h
+--- a/widget/CompositorWidget.h
++++ b/widget/CompositorWidget.h
+@@ -53,6 +53,10 @@
+ 
+ class CompositorWidgetDelegate {
+  public:
++ 
++  // INF_PATCH
++  virtual void* Surface_Pop() { return nullptr; }
++ 
+   virtual PlatformCompositorWidgetDelegate* AsPlatformSpecificDelegate() {
+     return nullptr;
+   }
+diff --git a/widget/windows/CompositorWidgetChild.h b/widget/windows/CompositorWidgetChild.h
+--- a/widget/windows/CompositorWidgetChild.h
++++ b/widget/windows/CompositorWidgetChild.h
+@@ -28,6 +28,15 @@
+   ~CompositorWidgetChild() override;
+ 
+   bool Initialize();
++  
++#ifdef INF_PATCH
++  // TODO: Mutex mSharedSurface so can't reset it whilst its being Set, potentially losing frames.
++  virtual void* Surface_Pop() { auto thing = mSharedSurface; mSharedSurface = nullptr; return thing; }
++  void  Surface_Set(void *value) { mSharedSurface = value; }
++private:
++   HANDLE mSharedSurface;
++public:
++#endif // INF_PATCH
+ 
+   void EnterPresentLock() override;
+   void LeavePresentLock() override;
+diff --git a/xpcom/reflect/xptinfo/xptinfo.cpp b/xpcom/reflect/xptinfo/xptinfo.cpp
+--- a/xpcom/reflect/xptinfo/xptinfo.cpp
++++ b/xpcom/reflect/xptinfo/xptinfo.cpp
+@@ -98,3 +98,31 @@
+ 
+   return mozilla::dom::AtomizeAndPinJSString(aCx, aId, Name());
+ }
++
++
++#ifdef INF_PATCH
++
++// Moved out of header so we can experiment.
++// Defined in: mozilla\dom\bindings\DOMJSClass.h
++
++bool PrefableDisablers::isEnabled(JSContext* cx, JS::Handle<JSObject*> obj) const {
++
++    if (nonExposedGlobals &&
++        IsNonExposedGlobal(cx, JS::GetNonCCWObjectGlobal(obj),
++                           nonExposedGlobals)) {
++      return false;
++    }
++    if (prefIndex != WebIDLPrefIndex::NoPref &&
++        !sWebIDLPrefs[uint16_t(prefIndex)]()) {
++      return false;
++    }
++    if (secureContext && !IsSecureContextOrObjectIsFromSecureContext(cx, obj)) {
++      return false;
++    }
++    if (enabledFunc && !enabledFunc(cx, JS::GetNonCCWObjectGlobal(obj))) {
++      return false;
++    }
++    return true;
++ }
++
++#endif // INF_PATCH
+\ No newline at end of file
+diff --git a/xpfe/appshell/AppWindow.cpp b/xpfe/appshell/AppWindow.cpp
+--- a/xpfe/appshell/AppWindow.cpp
++++ b/xpfe/appshell/AppWindow.cpp
+@@ -103,6 +103,11 @@
+ 
+ #define SIZE_PERSISTENCE_TIMEOUT 500  // msec
+ 
++#ifdef INF_PATCH
++void __cdecl Gecko_SetFullScreen(void *id, bool full_screen);
++#endif
++
++
+ //*****************************************************************************
+ //***    AppWindow: Object Management
+ //*****************************************************************************
+diff --git a/xpfe/appshell/AppWindow.h b/xpfe/appshell/AppWindow.h
+--- a/xpfe/appshell/AppWindow.h
++++ b/xpfe/appshell/AppWindow.h
+@@ -176,6 +176,12 @@
+ 
+   explicit AppWindow(uint32_t aChromeFlags);
+ 
++#ifdef INF_PATCH
++  void  SetEmbedUserData(void *value) { m_user = value; }
++  void *GetEmbedUserData() { return m_user; }
++  void *m_user;
++#endif  
++
+  protected:
+   enum persistentAttributes {
+     PAD_MISC = 0x1,
+diff --git a/xpfe/appshell/nsAppShellService.cpp b/xpfe/appshell/nsAppShellService.cpp
+--- a/xpfe/appshell/nsAppShellService.cpp
++++ b/xpfe/appshell/nsAppShellService.cpp
+@@ -58,6 +58,10 @@
+ 
+ class nsIAppShell;
+ 
++#ifdef INF_PATCH
++bool Gecko_Embed();
++#endif
++
+ nsAppShellService::nsAppShellService()
+     : mXPCOMWillShutDown(false),
+       mXPCOMShuttingDown(false),
+diff --git a/xpfe/appshell/nsChromeTreeOwner.h b/xpfe/appshell/nsChromeTreeOwner.h
+--- a/xpfe/appshell/nsChromeTreeOwner.h
++++ b/xpfe/appshell/nsChromeTreeOwner.h
+@@ -37,12 +37,14 @@
+   NS_DECL_NSIDOCSHELLTREEOWNER
+   NS_DECL_NSIWEBPROGRESSLISTENER
+ 
++// INF_PATCH: Need public access
++  mozilla::AppWindow* AppWindow();
++
+  protected:
+   nsChromeTreeOwner();
+   virtual ~nsChromeTreeOwner();
+ 
+   void AppWindow(mozilla::AppWindow* aAppWindow);
+-  mozilla::AppWindow* AppWindow();
+ 
+  protected:
+   mozilla::AppWindow* mAppWindow;
+# HG changeset patch
+# User stevew <steve@advance-software.com>
+# Date 1641133152 0
+#      Sun Jan 02 14:19:12 2022 +0000
+# Node ID 7534a81d597745bac83238a747b0578746d29fe3
+# Parent  31e519610c76519d460c74f064bea0b6553c987e
+INF_PATCH: partial, working, ff.
+
+diff --git a/gfx/layers/d3d11/CompositorD3D11.cpp b/gfx/layers/d3d11/CompositorD3D11.cpp
+--- a/gfx/layers/d3d11/CompositorD3D11.cpp
++++ b/gfx/layers/d3d11/CompositorD3D11.cpp
+@@ -123,6 +123,10 @@
+       mIsDoubleBuffered(false),
+       mVerifyBuffersFailed(false),
+       mUseMutexOnPresent(false),
++#ifdef INF_PATCH
++         m_dimensions_changed(false),
++         m_producer_mutex(nullptr),
++#endif // INF_PATCH
+       mUseForSoftwareWebRender(false) {
+   mUseMutexOnPresent = StaticPrefs::gfx_use_mutex_on_present_AtStartup();
+ }
+@@ -1161,6 +1165,13 @@
+                                            const Maybe<IntRect>& aClipRect,
+                                            const IntRect& aRenderBounds,
+                                            const nsIntRegion& aOpaqueRegion) {
++
++#ifdef INF_PATCH
++         // TODO[OPT]: Don't composite when parent (infinity) is minimized.
++         if (0) // if (!Gecko_Embed()) // TODO: State not propagated thus processes yet.
++         {
++#endif // INF_PATCH
++
+   // Don't composite if we are minimised. Other than for the sake of efficency,
+   // this is important because resizing our buffers when mimised will fail and
+   // cause a crash when we're restored.
+@@ -1172,6 +1183,11 @@
+     return Nothing();
+   }
+ 
++
++#ifdef INF_PATCH
++         }
++#endif // INF_PATCH
++
+   if (mDevice->GetDeviceRemovedReason() != S_OK) {
+     ReadUnlockTextures();
+ 
+@@ -1236,6 +1252,14 @@
+ 
+   mContext->RSSetState(mAttachments->mRasterizerState);
+ 
++#ifdef INF_PATCH
++   if (m_producer_mutex)
++   {
++      // Grab the shared resource mutex so we can render to the surface.
++      HRESULT hr = m_producer_mutex->AcquireSync(__shared_surface_access_key, INFINITE);
++   }
++#endif // INF_PATCH
++
+   SetRenderTarget(mDefaultRT);
+ 
+   IntRegion regionToClear(mCurrentClip);
+@@ -1328,6 +1352,18 @@
+   Compositor::EndFrame();
+   mTarget = nullptr;
+   mCurrentRT = nullptr;
++
++#ifdef INF_PATCH
++   // We're done drawing, so release the mutex.
++   if (m_producer_mutex)
++   {
++      HRESULT hr = m_producer_mutex->ReleaseSync(__shared_surface_access_key);
++
++      // Inform parent an update has occured.
++      // This patch uses a null parent parameter to indicate  we're sending a shared surface handle not a window handle.
++      ((mozilla::widget::CompositorWidgetParent*) mWidget)->UpdateCompositorWnd((HWND) m_status.m_shared_surface_handle, nullptr);
++}
++#endif // INF_PATCH
+ }
+ 
+ void CompositorD3D11::GetFrameStats(GPUStats* aStats) {
+@@ -1351,6 +1387,11 @@
+     PaintToTarget();
+   }
+ 
++#ifdef INF_PATCH
++         if (mSwapChain)
++         {
++#endif // INF_PATCH
++
+   RefPtr<IDXGISwapChain1> chain;
+   HRESULT hr =
+       mSwapChain->QueryInterface((IDXGISwapChain1**)getter_AddRefs(chain));
+@@ -1411,7 +1452,12 @@
+       gfxCriticalNote << "D3D11 swap chain preset failed " << hexa(hr);
+       HandleError(hr);
+     }
++
++#ifdef INF_PATCH
+   }
++#endif // INF_PATCH
++
++   }
+ 
+   if (mIsDoubleBuffered) {
+     mBackBufferInvalid = mFrontBufferInvalid;
+@@ -1480,7 +1526,17 @@
+          sizeof(mVSConstants.projection));
+ }
+ 
++
++#ifdef INF_PATCH
++void CompositorD3D11::EnsureSize()
++{
++         auto rect = mWidget->GetClientSize();
++         m_dimensions_changed = (mSize.width != rect.width) || (mSize.height != rect.height);
++         mSize = rect;
++}
++#else
+ void CompositorD3D11::EnsureSize() { mSize = mWidget->GetClientSize(); }
++#endif // INF_PATCH
+ 
+ bool CompositorD3D11::VerifyBufferSize() {
+   mWidget->AsWindows()->UpdateCompositorWndSizeIfNecessary();
+@@ -1571,12 +1627,129 @@
+ 
+   RefPtr<ID3D11Texture2D> backBuf;
+ 
++#ifdef INF_PATCH
++
++         if (1) // if (Gecko_Embed()) // TODO: State not propogated thru processes yet.
++         {
++            if (m_dimensions_changed)
++            {
++               // Copied from VerifyBufferSize
++               if (mDefaultRT)
++               {
++                  if (mCurrentRT == mDefaultRT)
++                     mCurrentRT = nullptr;
++
++                  MOZ_ASSERT(mDefaultRT->hasOneRef());
++                  mDefaultRT = nullptr;
++               }
++            }
++         }
++         else
++#endif // INF_PATCH
++
+   if (!VerifyBufferSize()) {
+     gfxCriticalNote << "Failed VerifyBufferSize in UpdateRenderTarget "
+                     << mSize;
+     return false;
+   }
+ 
++
++#ifdef INF_PATCH
++
++         // TODO: Factor this down to minimize the chance of merge errors.
++
++         if (1) //if (Gecko_Embed()) // TODO: State not propogates thru processes yet.
++         {
++             backBuf = (ID3D11Texture2D *) m_status.m_native_destination;
++
++            // Reallocate if surface dimensions have changed
++            // TODO[?]: Might need to mutex or critical section this.
++            if (backBuf && m_dimensions_changed)
++            {
++               m_status.m_native_destination = nullptr;
++               m_status.m_shared_surface_handle = nullptr;
++ 
++               backBuf->Release();
++               backBuf = nullptr;
++
++               if (m_producer_mutex) {
++                 m_producer_mutex->Release();
++                 //m_producer_mutex = nullptr;
++               }
++            }
++
++            if (!backBuf)
++            {
++               m_dimensions_changed = false;
++
++               nsIWidget *wid = mWidget->RealWidget();
++               nsWindowType wt = wid ? wid->WindowType() : eWindowType_toplevel;
++
++               DWORD tex_width, tex_height;
++
++               if (wt == eWindowType_popup)
++               {
++                  mozilla::LayoutDeviceIntRect rect = wid->GetClientBounds();
++                  tex_width = rect.width;
++                  tex_height = rect.height;
++               }
++               else
++               {
++                  tex_width = mSize.width;
++                  tex_height = mSize.height;
++               }
++
++               // Create a render surface ...
++
++               // Creates a texture surface for rendering.
++
++               // DXGI_FORMAT_B8G8R8A8_UNORM_SRGB
++               CD3D11_TEXTURE2D_DESC desc(DXGI_FORMAT_B8G8R8A8_UNORM, tex_width, tex_height, 1, 1);
++               desc.BindFlags = D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE;
++               desc.MiscFlags = D3D11_RESOURCE_MISC_SHARED_KEYEDMUTEX;
++               desc.Usage = D3D11_USAGE_DEFAULT;
++
++               hr = mDevice->CreateTexture2D(&desc, nullptr, getter_AddRefs(backBuf));
++
++               // Get the keyed mutex for the shared texture
++               if (backBuf)
++               {
++                  hr = backBuf->QueryInterface(__uuidof(IDXGIKeyedMutex), (void**) &m_producer_mutex);
++
++                  // A key of 0 is required to initiate access to the mutex (producer only)
++                  if (m_producer_mutex)
++                  {
++                     m_producer_mutex->AcquireSync(0, INFINITE);
++                     m_producer_mutex->ReleaseSync(__shared_surface_access_key);
++
++                     // ... we then switch to our access key.
++
++                     // A shared handle is obtained through the DXGI interface ...
++                     IDXGIResource* resource_dxgi = nullptr;
++                     backBuf->QueryInterface(__uuidof(IDXGIResource), (LPVOID*) &resource_dxgi);
++
++                     // Grab shared surface handle
++                     if (resource_dxgi) 
++                     {
++                       resource_dxgi->GetSharedHandle(&m_status.m_shared_surface_handle);
++                       resource_dxgi->Release();
++                     }
++                  }
++
++                  // Ensure DX11 render target texture is accessible from external API.
++                  m_status.m_native_destination = (void*) backBuf.get();
++               }
++               else
++                  m_status.m_native_destination = nullptr;
++            }
++
++            if (!backBuf)
++               return false;
++         }
++         else
++         {
++#endif // INF_PATCH
++
+   if (mSize.width <= 0 || mSize.height <= 0) {
+     gfxCriticalNote << "Invalid size in UpdateRenderTarget " << mSize << ", "
+                     << (int)mVerifyBuffersFailed;
+@@ -1601,6 +1774,10 @@
+     return false;
+   }
+ 
++#ifdef INF_PATCH
++         }
++#endif  
++
+   IntRegion validFront;
+   validFront.Sub(mBackBufferInvalid, mFrontBufferInvalid);
+ 
+diff --git a/gfx/layers/ipc/CompositorThread.cpp b/gfx/layers/ipc/CompositorThread.cpp
+--- a/gfx/layers/ipc/CompositorThread.cpp
++++ b/gfx/layers/ipc/CompositorThread.cpp
+@@ -70,11 +70,11 @@
+                    data. 128ms is chosen for transient hangs because 8Hz should
+                    be the minimally acceptable goal for Compositor
+                    responsiveness (normal goal is 60Hz). */
+-                128,
++                0, // INF_PATCH
+                 /* 2048ms is chosen for permanent hangs because it's longer than
+                  * most Compositor hangs seen in the wild, but is short enough
+                  * to not miss getting native hang stacks. */
+-                2048);
++               0); // INF_PATCH
+             nsCOMPtr<nsIThread> thread = NS_GetCurrentThread();
+             static_cast<nsThread*>(thread.get())->SetUseHangMonitor(true);
+           }),
+# HG changeset patch
+# User stevew <steve@advance-software.com>
+# Date 1641138450 0
+#      Sun Jan 02 15:47:30 2022 +0000
+# Node ID b90121788aad1f0bca27f6635599c4a5c3329fb9
+# Parent  7534a81d597745bac83238a747b0578746d29fe3
+INF_PATCH - incremental working but ff video controls missing after fullscreen return.
+
+diff --git a/dom/base/nsGlobalWindowOuter.cpp b/dom/base/nsGlobalWindowOuter.cpp
+--- a/dom/base/nsGlobalWindowOuter.cpp
++++ b/dom/base/nsGlobalWindowOuter.cpp
+@@ -4543,6 +4543,7 @@
+   nsCOMPtr<nsPIDOMWindowOuter> window =
+       rootItem ? rootItem->GetWindow() : nullptr;
+   if (!window) return NS_ERROR_FAILURE;
++
+   if (rootItem != mDocShell)
+     return window->SetFullscreenInternal(aReason, aFullscreen);
+ 
+diff --git a/gfx/layers/ipc/ShadowLayers.cpp b/gfx/layers/ipc/ShadowLayers.cpp
+--- a/gfx/layers/ipc/ShadowLayers.cpp
++++ b/gfx/layers/ipc/ShadowLayers.cpp
+@@ -221,7 +221,12 @@
+ };
+ 
+ ShadowLayerForwarder::~ShadowLayerForwarder() {
++#ifdef INF_PATCH
++   mTxn->End();
++#else
+   MOZ_ASSERT(mTxn->Finished(), "unfinished transaction?");
++#endif // INF_PATCH
++
+   delete mTxn;
+   if (mShadowManager) {
+     mShadowManager->SetForwarder(nullptr);
+diff --git a/gfx/thebes/DeviceManagerDx.cpp b/gfx/thebes/DeviceManagerDx.cpp
+--- a/gfx/thebes/DeviceManagerDx.cpp
++++ b/gfx/thebes/DeviceManagerDx.cpp
+@@ -115,11 +115,20 @@
+   return true;
+ }
+ 
++
++
++
+ bool DeviceManagerDx::LoadDcomp() {
+   MOZ_ASSERT(gfxConfig::GetFeature(Feature::D3D11_COMPOSITING).IsEnabled());
++
++#ifndef INF_PATCH
++  if (!Gecko_Embed())
++  {
+   MOZ_ASSERT(gfxVars::UseWebRender());
+   MOZ_ASSERT(gfxVars::UseWebRenderANGLE());
+   MOZ_ASSERT(gfxVars::UseWebRenderDCompWin());
++	}
++#endif // INF_PATCH
+ 
+   if (sDcompCreateDevice2Fn) {
+     return true;
+diff --git a/gfx/thebes/gfxWindowsPlatform.cpp b/gfx/thebes/gfxWindowsPlatform.cpp
+--- a/gfx/thebes/gfxWindowsPlatform.cpp
++++ b/gfx/thebes/gfxWindowsPlatform.cpp
+@@ -385,6 +385,19 @@
+ }
+ 
+ void gfxWindowsPlatform::InitWebRenderConfig() {
++
++#ifdef INF_PATCH
++  // INF_PATCH: WebRender not patched yet - we currently require the D3D11 compositor.
++  if (XRE_IsParentProcess())
++  {
++      if (Gecko_Embed())
++      {
++         gfxVars::SetUseWebRender(false);
++         return;
++      }
++  }
++#endif  
++
+   gfxPlatform::InitWebRenderConfig();
+ 
+   if (gfxVars::UseWebRender()) {
+diff --git a/ipc/glue/MessagePump.cpp b/ipc/glue/MessagePump.cpp
+--- a/ipc/glue/MessagePump.cpp
++++ b/ipc/glue/MessagePump.cpp
+@@ -106,10 +106,44 @@
+     did_work = aDelegate->DoIdleWork();
+     if (!keep_running_) break;
+ 
++#ifdef INF_PATCH
++   
++    if (Gecko_Embed())
++    {
++    auto pt = XRE_GetProcessType();
++
++    if (pt == GeckoProcessType_Default) {
++		
++	   // Gecko embedding apps interop directly in root process only.
++      
++	   // LOAD_BALANCE_1: We need to keep infinity apps at interactive performance.
++	   did_work = true;
++
++	   // LOAD_BALANCE_2: However, some Mozilla processing delivers in idle, hence there must be some.
++
++      static size_t _counter = 0;
++	  
++	   if ( (++_counter % 4) == 0)
++	   {
++		  did_work = false;
++        _counter = 0;
++ 	   }
++
++      bool inf_did_work = false;
++      if (!Gecko_App_Processing(inf_did_work)) keep_running_ = false;
++    }
++   }
++#endif  // INF_PATCH	
++
++#ifdef INF_PATCH
+     if (did_work) continue;
+ 
+     // This will either sleep or process an event.
++    if (Gecko_Embed())
++       ::SwitchToThread(); // Maybe ::Sleep(50) or whatever. & requires x-platform wrapper.
++    else
+     NS_ProcessNextEvent(thisThread, true);
++#endif
+   }
+ 
+   mDelayedWorkTimer->Cancel();
+diff --git a/ipc/glue/WindowsMessageLoop.cpp b/ipc/glue/WindowsMessageLoop.cpp
+--- a/ipc/glue/WindowsMessageLoop.cpp
++++ b/ipc/glue/WindowsMessageLoop.cpp
+@@ -27,10 +27,6 @@
+ using namespace mozilla::ipc;
+ using namespace mozilla::ipc::windows;
+ 
+-#ifdef INF_PATCH
+-#include "_update_info.h"
+-#include "adv_sw_patch.h"
+-#endif // INF_PATCH
+ 
+ /**
+  * The Windows-only code below exists to solve a general problem with deadlocks
+diff --git a/layout/base/nsRefreshDriver.cpp b/layout/base/nsRefreshDriver.cpp
+--- a/layout/base/nsRefreshDriver.cpp
++++ b/layout/base/nsRefreshDriver.cpp
+@@ -2468,11 +2468,18 @@
+ #endif
+ 
+     mViewManagerFlushIsPending = false;
++
+     RefPtr<nsViewManager> vm = mPresContext->GetPresShell()->GetViewManager();
++
++#ifdef INF_PATCH
++    const bool skipPaint = false;  // Always give us what you have, please.
++#else
+     const bool skipPaint = isPresentingInVR;
+     // Skip the paint in immersive VR mode because whatever we paint here will
+     // not end up on the screen. The screen is displaying WebGL content from a
+     // single canvas in that mode.
++#endif // INF_PATCH
++
+     if (!skipPaint) {
+       PaintTelemetry::AutoRecordPaint record;
+       vm->ProcessPendingUpdates();
+diff --git a/toolkit/components/gfx/SanityTest.jsm b/toolkit/components/gfx/SanityTest.jsm
+--- a/toolkit/components/gfx/SanityTest.jsm
++++ b/toolkit/components/gfx/SanityTest.jsm
+@@ -332,6 +332,14 @@
+   ]),
+ 
+   shouldRunTest() {
++	  
++	  
++	// INF_PATCH[BEGIN]
++	//  Disabled for now as we redirect output & the test needs fixing up to complete under that configuration in order to proceed here.
++	//if (env.get("MOZ_GECKO_SERVER"))
++       return false;
++    // INF_PATCH[END]
++   
+     // Only test gfx features if firefox has updated, or if the user has a new
+     // gpu or drivers.
+     var buildId = Services.appinfo.platformBuildID;
+diff --git a/toolkit/components/startup/nsAppStartup.cpp b/toolkit/components/startup/nsAppStartup.cpp
+--- a/toolkit/components/startup/nsAppStartup.cpp
++++ b/toolkit/components/startup/nsAppStartup.cpp
+@@ -152,7 +152,14 @@
+ //
+ 
+ nsAppStartup::nsAppStartup()
++
++#ifdef INF_PATCH
++    // Prevents standard firefox quit when no open windows behaviour. As a content server, we open windows as we need them.
++  : mConsiderQuitStopper(1),
++#else
+     : mConsiderQuitStopper(0),
++#endif
++
+       mRunning(false),
+       mShuttingDown(false),
+       mStartingUp(true),
+@@ -263,7 +270,13 @@
+   // quit, don't bother running the event loop which would probably leave us
+   // with a zombie process.
+ 
++#ifdef INF_PATCH
++  // In content server mode, don't exit when no windows are open. They open as required. Exit is explicitly requested.
++  if (!mShuttingDown) {
++#else
+   if (!mShuttingDown && mConsiderQuitStopper != 0) {
++#endif
++
+ #ifdef XP_MACOSX
+     EnterLastWindowClosingSurvivalArea();
+ #endif
+@@ -544,7 +557,9 @@
+ 
+ NS_IMETHODIMP
+ nsAppStartup::EnterLastWindowClosingSurvivalArea(void) {
++#ifndef INF_PATCH
+   ++mConsiderQuitStopper;
++#endif
+   return NS_OK;
+ }
+ 
+@@ -553,6 +568,8 @@
+   NS_ASSERTION(mConsiderQuitStopper > 0, "consider quit stopper out of bounds");
+   --mConsiderQuitStopper;
+ 
++#ifndef INF_PATCH
++
+   if (mRunning) {
+     bool userAllowedQuit = false;
+ 
+@@ -563,6 +580,9 @@
+     Quit(eConsiderQuit, mozilla::AppShutdown::GetExitCode(), &userAllowedQuit);
+   }
+ 
++
++#endif // INF_PATCH
++
+   return NS_OK;
+ }
+ 
+@@ -1023,8 +1043,13 @@
+ NS_IMETHODIMP
+ nsAppStartup::RestartInSafeMode(uint32_t aQuitMode) {
+   PR_SetEnv("MOZ_SAFE_MODE_RESTART=1");
++
++#ifdef INF_PATCH
++// Infinity apps don't currently support restart.
++#else
+   bool userAllowedQuit = false;
+   this->Quit(aQuitMode | nsIAppStartup::eRestart, 0, &userAllowedQuit);
++#endif
+ 
+   return NS_OK;
+ }
+diff --git a/toolkit/components/windowwatcher/nsWindowWatcher.cpp b/toolkit/components/windowwatcher/nsWindowWatcher.cpp
+--- a/toolkit/components/windowwatcher/nsWindowWatcher.cpp
++++ b/toolkit/components/windowwatcher/nsWindowWatcher.cpp
+@@ -488,7 +488,14 @@
+       Preferences::GetBool("browser.privatebrowsing.autostart");
+ 
+   nsCOMPtr<nsPIDOMWindowOuter> parentWindowOuter;
+-  RefPtr<BrowsingContext> parentBC = aOpenWindowInfo->GetParent();
++  RefPtr<BrowsingContext> parentBC;
++
++#ifdef INF_PATCH
++// null gating.
++  if (aOpenWindowInfo)
++    parentBC = aOpenWindowInfo->GetParent();
++#endif
++
+   if (parentBC) {
+     RefPtr<Element> browserElement = parentBC->Top()->GetEmbedderElement();
+     if (browserElement && browserElement->GetOwnerGlobal() &&
+@@ -510,15 +517,22 @@
+     parentWindowOuter = nsContentUtils::GetMostRecentNonPBWindow();
+   }
+ 
++#ifndef INF_PATCH
+   if (NS_WARN_IF(!parentWindowOuter)) {
+     return NS_ERROR_UNEXPECTED;
+   }
++#endif
+ 
+-  nsCOMPtr<nsIDocShellTreeOwner> parentTreeOwner =
+-      parentWindowOuter->GetTreeOwner();
++  nsCOMPtr<nsIDocShellTreeOwner> parentTreeOwner;
++
++  if (parentWindowOuter)
++      parentTreeOwner = parentWindowOuter->GetTreeOwner();
++
++#ifndef INF_PATCH  
+   if (NS_WARN_IF(!parentTreeOwner)) {
+     return NS_ERROR_UNEXPECTED;
+   }
++#endif
+ 
+   if (NS_WARN_IF(!mWindowCreator)) {
+     return NS_ERROR_UNEXPECTED;
+diff --git a/toolkit/library/rust/shared/lib.rs b/toolkit/library/rust/shared/lib.rs
+--- a/toolkit/library/rust/shared/lib.rs
++++ b/toolkit/library/rust/shared/lib.rs
+@@ -97,7 +97,9 @@
+ #[no_mangle]
+ pub extern "C" fn GkRust_Init() {
+     // Initialize logging.
+-    let _ = GeckoLogger::init();
++    
++    // INF_PATCH: Panics trying to open console in release build - there isn't one, so disabled for now.
++    //let _ = GeckoLogger::init();
+ }
+ 
+ #[no_mangle]
+diff --git a/toolkit/xre/nsAppRunner.cpp b/toolkit/xre/nsAppRunner.cpp
+--- a/toolkit/xre/nsAppRunner.cpp
++++ b/toolkit/xre/nsAppRunner.cpp
+@@ -255,6 +255,15 @@
+ void _cdecl Program_Terminate();
+ bool __gecko_app = false;
+ 
++
++// Note this currently only works in the root process.
++// TODO: IPC propogate state thru to child processes or use environment variable.
++bool __cdecl Gecko_Embed()
++{
++	return __gecko_app;
++}
++
++
+ // BCryptGenRandom unresolved without this.
+ #pragma comment(lib, "Bcrypt.lib") 
+ // TODO: Remove from mozwer.cpp - better here as works with old version too.
+@@ -5530,6 +5539,7 @@
+ 
+ void XRE_StopLateWriteChecks(void) { mozilla::StopLateWriteChecks(); }
+ 
++
+ int XRE_main(int argc, char* argv[], const BootstrapConfig& aConfig) {
+   XREMain main;
+ 
+diff --git a/uriloader/base/nsDocLoader.cpp b/uriloader/base/nsDocLoader.cpp
+--- a/uriloader/base/nsDocLoader.cpp
++++ b/uriloader/base/nsDocLoader.cpp
+@@ -1086,6 +1086,10 @@
+ // on this information.
+ ////////////////////////////////////////////////////////////////////////////////////
+ 
++#ifdef INF_PATCH
++void __stdcall Inf_Progress_Update();
++#endif
++
+ NS_IMETHODIMP nsDocLoader::OnProgress(nsIRequest* aRequest, int64_t aProgress,
+                                       int64_t aProgressMax) {
+   int64_t progressDelta = 0;
+@@ -1151,6 +1155,10 @@
+       }
+ 
+       FireOnStateChange(this, aRequest, flags, NS_OK);
++
++#ifdef INF_PATCH
++      Inf_Progress_Update();
++#endif
+     }
+ 
+     // Update our overall current progress count.
+diff --git a/uriloader/preload/PreloaderBase.cpp b/uriloader/preload/PreloaderBase.cpp
+--- a/uriloader/preload/PreloaderBase.cpp
++++ b/uriloader/preload/PreloaderBase.cpp
+@@ -130,7 +130,9 @@
+     // This means there is already a preload registered under this key in this
+     // document.  We only allow replacement when this is a regular load.
+     // Otherwise, this should never happen and is a suspected misuse of the API.
+-    MOZ_ASSERT_IF(alreadyRegistered, !aIsPreload);
++
++    // INF_PATCH: Triggered by france24.
++    //MOZ_ASSERT_IF(alreadyRegistered, !aIsPreload);
+   }
+ 
+   mKey = aKey;
+diff --git a/widget/nsBaseWidget.cpp b/widget/nsBaseWidget.cpp
+--- a/widget/nsBaseWidget.cpp
++++ b/widget/nsBaseWidget.cpp
+@@ -129,6 +129,11 @@
+ // milliseconds.
+ const uint32_t kAsyncDragDropTimeout = 1000;
+ 
++
++#ifdef INF_PATCH
++bool Gecko_Embed();
++#endif
++
+ namespace mozilla::widget {
+ 
+ void IMENotification::SelectionChangeDataBase::SetWritingMode(
+@@ -1317,6 +1322,16 @@
+     // EnsureGPUReady(). It could update gfxVars and gfxConfigs.
+     gpu->EnsureGPUReady();
+ 
++#ifdef INF_PATCH
++   if (Gecko_Embed())
++   {
++		 // We've only patched D3D11 ClientLayerManager compositor thus far.
++		nsCString msg("infinity_override");
++      gfx::GPUProcessManager::Get()->DisableWebRender( wr::WebRenderError::INITIALIZE, msg);
++	}
++#endif // INF_PATCH
++
++
+     // If widget type does not supports acceleration, we may be allowed to use
+     // software WebRender instead. If not, then we use ClientLayerManager even
+     // when gfxVars::UseWebRender() is true. WebRender could coexist only with
+@@ -1469,6 +1484,17 @@
+     ImageBridgeChild::IdentifyCompositorTextureHost(textureFactoryIdentifier);
+     gfx::VRManagerChild::IdentifyTextureHost(textureFactoryIdentifier);
+   } else if (lm->AsClientLayerManager()) {
++
++#ifdef INF_PATCH
++
++	if (Gecko_Embed())
++	{
++		// Provide access the compositor native widget from the layer manager
++    	auto clm = lm->AsClientLayerManager();
++      clm->SetCompositorWidgetChild((void*) mCompositorSession->GetCompositorWidgetDelegate());
++	}
++#endif // INF_PATCH
++
+     TextureFactoryIdentifier textureFactoryIdentifier =
+         lm->GetTextureFactoryIdentifier();
+     // Some popup or transparent widgets may use a different backend than the
+diff --git a/widget/windows/CompositorWidgetChild.cpp b/widget/windows/CompositorWidgetChild.cpp
+--- a/widget/windows/CompositorWidgetChild.cpp
++++ b/widget/windows/CompositorWidgetChild.cpp
+@@ -31,6 +31,10 @@
+   MOZ_ASSERT(XRE_IsParentProcess());
+   MOZ_ASSERT(!gfxPlatform::IsHeadless());
+   MOZ_ASSERT(mWnd && ::IsWindow(mWnd));
++
++#ifdef INF_PATCH
++  mSharedSurface = nullptr;
++#endif 
+ }
+ 
+ CompositorWidgetChild::~CompositorWidgetChild() {}
+@@ -92,6 +96,16 @@
+     const WindowsHandle& aCompositorWnd, const WindowsHandle& aParentWnd,
+     UpdateCompositorWndResolver&& aResolve) {
+   HWND parentWnd = reinterpret_cast<HWND>(aParentWnd);
++  
++#ifdef INF_PATCH
++   if (!aParentWnd)
++   {
++      // null parent window means we should assign a shared surface handle
++      Surface_Set((HANDLE) aCompositorWnd);
++   }
++   else {
++#endif // INF_PATCH
++  
+   if (mWnd == parentWnd) {
+     mCompositorWnd = reinterpret_cast<HWND>(aCompositorWnd);
+     ::SetParent(mCompositorWnd, mWnd);
+@@ -102,6 +116,10 @@
+     MOZ_ASSERT_UNREACHABLE("unexpected to happen");
+   }
+ 
++#ifdef INF_PATCH
++}
++#endif // INF_PATCH
++
+   return IPC_OK();
+ }
+ 
+# HG changeset patch
+# User stevew <steve@advance-software.com>
+# Date 1641157352 0
+#      Sun Jan 02 21:02:32 2022 +0000
+# Node ID cf8d47dffc8fe2153d3dcee77e53e1c17d331b6a
+# Parent  b90121788aad1f0bca27f6635599c4a5c3329fb9
+INF_PATCH: incremental. working (except full screen)
+
+diff --git a/toolkit/xre/nsAppRunner.cpp b/toolkit/xre/nsAppRunner.cpp
+--- a/toolkit/xre/nsAppRunner.cpp
++++ b/toolkit/xre/nsAppRunner.cpp
+@@ -256,6 +256,27 @@
+ bool __gecko_app = false;
+ 
+ 
++// For getenv
++#include <stdlib.h>     
++
++static bool __patch_initialized = false;
++static bool __is_patch_active = false;
++
++bool __cdecl xGecko_Embed()
++{
++   if (!__patch_initialized)
++   {
++      auto value = getenv("MOZ_GECKO_SERVER");
++      
++	  __is_patch_active = value && (value[0] != '\0');
++	  
++      __patch_initialized = true;
++   }
++
++   return __is_patch_active;
++}
++
++
+ // Note this currently only works in the root process.
+ // TODO: IPC propogate state thru to child processes or use environment variable.
+ bool __cdecl Gecko_Embed()
+@@ -263,7 +284,6 @@
+ 	return __gecko_app;
+ }
+ 
+-
+ // BCryptGenRandom unresolved without this.
+ #pragma comment(lib, "Bcrypt.lib") 
+ // TODO: Remove from mozwer.cpp - better here as works with old version too.
+@@ -5820,4 +5840,4 @@
+ #include "..\..\..\infinity\apps\mozilla\win_find_utils.cpp"
+ #include "..\..\..\infinity\apps\mozilla\inf_app_mozilla.cpp"
+ 
+-#endif // INF_PATCH
++#endif // INF_PATCH
+\ No newline at end of file
+diff --git a/widget/windows/WinMouseScrollHandler.cpp b/widget/windows/WinMouseScrollHandler.cpp
+--- a/widget/windows/WinMouseScrollHandler.cpp
++++ b/widget/windows/WinMouseScrollHandler.cpp
+@@ -24,6 +24,10 @@
+ 
+ #include <psapi.h>
+ 
++#ifdef INF_PATCH
++void * _WindowFromPoint(void *wnd, void *point);
++#endif
++
+ namespace mozilla {
+ namespace widget {
+ 
+@@ -240,7 +244,12 @@
+   pt.x = aPoint.x;
+   pt.y = aPoint.y;
+ 
++#ifdef INF_PATCH
++  HWND target = useFocusedWindow ? (HWND) _WindowFromPoint(aWidget ? aWidget->GetWindowHandle() : nullptr, (void*) &pt) : ::GetFocus();
++#else
+   HWND target = useFocusedWindow ? ::WindowFromPoint(pt) : ::GetFocus();
++#endif // INF_PATCH
++
+   NS_ENSURE_TRUE(target, NS_ERROR_FAILURE);
+ 
+   WPARAM wParam = 0;
+@@ -383,7 +392,12 @@
+            aWParam, aLParam, point.x, point.y));
+   MaybeLogKeyState();
+ 
++#ifdef INF_PATCH
++  HWND underCursorWnd = (HWND) _WindowFromPoint(aWidget ? aWidget->GetWindowHandle() : nullptr, (void*) &point);
++#else
+   HWND underCursorWnd = ::WindowFromPoint(point);
++#endif // INF_PATCH
++
+   if (!underCursorWnd) {
+     MOZ_LOG(gMouseScrollLog, LogLevel::Info,
+             ("MouseScroll::ProcessNativeMouseWheelMessage: "
+diff --git a/widget/windows/WinUtils.cpp b/widget/windows/WinUtils.cpp
+--- a/widget/windows/WinUtils.cpp
++++ b/widget/windows/WinUtils.cpp
+@@ -1915,6 +1915,12 @@
+ 
+ /* static */
+ PointerCapabilities WinUtils::GetPrimaryPointerCapabilities() {
++
++#ifdef INF_PATCH
++   // We only support this mode right now & don't want sub-functions creating an undesired app window hierarchy.
++   return PointerCapabilities::Fine | PointerCapabilities::Hover;
++#else
++
+   if (IsTabletDevice()) {
+     return PointerCapabilities::Coarse;
+   }
+@@ -1928,12 +1934,18 @@
+   }
+ 
+   return PointerCapabilities::None;
++#endif
+ }
+ 
+ /* static */
+ PointerCapabilities WinUtils::GetAllPointerCapabilities() {
+   PointerCapabilities result = PointerCapabilities::None;
+ 
++#ifdef INF_PATCH
++   // We only support this mode right now & don't want sub-functions creating an undesired app window hierarchy.
++   result |= PointerCapabilities::Fine | PointerCapabilities::Hover;
++#else
++
+   if (IsTabletDevice() || IsTouchDeviceSupportPresent()) {
+     result |= PointerCapabilities::Coarse;
+   }
+@@ -1941,6 +1953,7 @@
+   if (IsMousePresent()) {
+     result |= PointerCapabilities::Fine | PointerCapabilities::Hover;
+   }
++#endif // INF_PATCH
+ 
+   return result;
+ }
+diff --git a/widget/windows/nsWindow.cpp b/widget/windows/nsWindow.cpp
+--- a/widget/windows/nsWindow.cpp
++++ b/widget/windows/nsWindow.cpp
+@@ -232,6 +232,21 @@
+ using namespace mozilla::widget;
+ using namespace mozilla::plugins;
+ 
++#ifdef INF_PATCH
++
++#define INF_WND  NS_NATIVE_WINDOW
++
++#include "_update_info.h"
++
++bool __cdecl Gecko_Embed();
++
++void __cdecl _SetWindowTransparency(void *wnd, uint_8 alpha);
++
++#include "nsDeviceContext.h"
++#include "ClientLayerManager.h"
++#include "nsViewManager.h"
++
++#endif // INF_PATCH
+ /**************************************************************
+  **************************************************************
+  **
+@@ -631,6 +646,10 @@
+     gInitializedVirtualDesktopManager = true;
+   }
+ 
++#ifdef INF_PATCH
++  mPopupParentPageNativeWindow = nullptr;
++#endif // INF_PATCH
++
+   mIconSmall = nullptr;
+   mIconBig = nullptr;
+   mWnd = nullptr;
+@@ -898,6 +917,11 @@
+   }
+ 
+   if (mWindowType == eWindowType_popup) {
++
++#ifdef INF_PATCH
++     mPopupParentPageNativeWindow = (HWND) aNativeParent;
++#endif // INF_PATCH
++
+     if (!aParent) {
+       parent = nullptr;
+     }
+@@ -927,6 +951,12 @@
+     }
+   }
+ 
++#ifdef INF_PATCH
++  // Moz native windows are hidden without desktop icon. Infinity renders content where we need it.
++   if (Gecko_Embed())
++       extendedStyle |= WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE;
++#endif // INF_PATCH
++
+   const wchar_t* className;
+   if (aInitData->mDropShadow) {
+     className = GetWindowPopupClass();
+@@ -1010,6 +1040,22 @@
+   // that we have a mWnd.
+   mDefaultScale = -1.0;
+ 
++#ifdef INF_PATCH
++
++  if (Gecko_Embed())
++  {
++     // When we're running as a procedural texture, we make native HWND popups
++     // completely transparent so they are never visible on the desktop.
++     // TODO: Experiment with just hiding the window itself when time permits.
++     // Previously, an alpha of 5 was used & the popup placed behind the render
++     // window so mouse input was captured. This seems unnecessary so remove
++     // this comment if new behaviour proves to be satisfactory.
++     if (mWindowType == eWindowType_popup)
++       _SetWindowTransparency(mWnd, 5);
++  }
++
++#endif // INF_PATCH
++
+   if (mIsRTL) {
+     DWORD dwAttribute = TRUE;
+     DwmSetWindowAttribute(mWnd, DWMWA_NONCLIENT_RTL_LAYOUT, &dwAttribute,
+@@ -1120,6 +1166,26 @@
+ 
+ // Close this nsWindow
+ void nsWindow::Destroy() {
++
++#ifdef INF_PATCH_OFF
++
++   if (Gecko_Embed())
++   {
++      if (mWindowType == eWindowType_popup)
++      {
++         auto native_wnd = GetNativeData(INF_WND);
++
++         if (native_wnd && mPopupParentPageNativeWindow)
++         {
++             //Remove expired popup. 
++             // Too late to do here. parent window may have died. 
++             // TODO: manage in visibility settings. 
++             //_PopupHide(native_wnd, mPopupParentPageNativeWindow);
++         }
++      }
++   }
++#endif // INF_PATCH
++
+   // WM_DESTROY has already fired, avoid calling it twice
+   if (mOnDestroyCalled) return;
+ 
+@@ -1252,8 +1318,13 @@
+     case eWindowType_dialog:
+       style = WS_OVERLAPPED | WS_BORDER | WS_DLGFRAME | WS_SYSMENU | DS_3DLOOK |
+               DS_MODALFRAME | WS_CLIPCHILDREN;
++
++#ifndef INF_PATCH
++      // Any border decoration is applied by Infinity window manager, not native desktop GUI.
+       if (mBorderStyle != eBorderStyle_default)
+         style |= WS_THICKFRAME | WS_MINIMIZEBOX | WS_MAXIMIZEBOX;
++#endif // INF_PATCH
++
+       break;
+ 
+     case eWindowType_popup:
+@@ -1267,13 +1338,25 @@
+       NS_ERROR("unknown border style");
+       // fall through
+ 
++// INF_PATCH: invisible below
+     case eWindowType_toplevel:
+-    case eWindowType_invisible:
++      
+       style = WS_OVERLAPPED | WS_BORDER | WS_DLGFRAME | WS_SYSMENU |
+               WS_THICKFRAME | WS_MINIMIZEBOX | WS_MAXIMIZEBOX | WS_CLIPCHILDREN;
+       break;
+-  }
+-
++
++#ifdef INF_PATCH
++    case eWindowType_invisible:
++       // No decorations - we're offscreen.
++       // TODO: New window type eWindowType_offscreen to ensure this causes no unwanted side affects for other stuff.
++       style = WS_POPUP|WS_CLIPCHILDREN;
++       break;
++#endif // INF_PATCH
++
++  }
++
++#ifndef INF_PATCH
++  // Any border decoration is applied by Infinity window manager, not native desktop GUI.
+   if (mBorderStyle != eBorderStyle_default &&
+       mBorderStyle != eBorderStyle_all) {
+     if (mBorderStyle == eBorderStyle_none ||
+@@ -1321,6 +1404,8 @@
+     }
+   }
+ 
++#endif // INF_PATCH
++
+   if (mIsChildWindow) {
+     style |= WS_CLIPCHILDREN;
+     if (!(style & WS_POPUP)) {
+@@ -1354,8 +1439,14 @@
+       // fall through
+ 
+     case eWindowType_toplevel:
++// INF_PATCH: Invisible below
++      return WS_EX_WINDOWEDGE;
++
++#ifdef INF_PATCH
++    // Introduce _offscreen WindowType if invisible is used for other things.
+     case eWindowType_invisible:
+-      return WS_EX_WINDOWEDGE;
++       return WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE;
++#endif
+   }
+ }
+ 
+@@ -1704,12 +1795,16 @@
+   // SetWindowPos would get the correct answer.
+   mIsVisible = bState;
+ 
++#ifndef INF_PATCH
++  // INF_PATCH: Native window is never visible, we redirect them into infinity textures.
++  
+   // We may have cached an out of date visible state. This can happen
+   // when session restore sets the full screen mode.
+   if (mIsVisible)
+     mOldStyle |= WS_VISIBLE;
+   else
+     mOldStyle &= ~WS_VISIBLE;
++#endif // INF_PATCH
+ 
+   if (!mIsVisible && wasVisible) {
+     ClearCachedResources();
+@@ -1737,6 +1832,7 @@
+             ::ShowWindow(mWnd, SW_SHOWMINIMIZED);
+             break;
+           default:
++#ifndef INF_PATCH
+             if (CanTakeFocus() && !mAlwaysOnTop) {
+               ::ShowWindow(mWnd, SW_SHOWNORMAL);
+             } else {
+@@ -1746,25 +1842,54 @@
+                 Unused << GetAttention(2);
+               }
+             }
++#endif // INF_PATCH
+             break;
+         }
+       } else {
+         DWORD flags = SWP_NOSIZE | SWP_NOMOVE | SWP_SHOWWINDOW;
++#ifdef INF_PATCH
++        if (Gecko_Embed())
++            flags |= SWP_NOACTIVATE;
++#endif // INF_PATCH
+         if (wasVisible) flags |= SWP_NOZORDER;
+         if (mAlwaysOnTop) flags |= SWP_NOACTIVATE;
+ 
+         if (mWindowType == eWindowType_popup) {
++#ifdef INF_PATCH
++           if (Gecko_Embed())
++           {
++              auto native_widget = GetNativeData(INF_WND);
++
++              if (native_widget && mPopupParentPageNativeWindow)
++                 _PopupShow(native_widget, mPopupParentPageNativeWindow, this, flags);
++           }
++#endif // INF_PATCH
++
+           // ensure popups are the topmost of the TOPMOST
+           // layer. Remember not to set the SWP_NOZORDER
+           // flag as that might allow the taskbar to overlap
+           // the popup.
+           flags |= SWP_NOACTIVATE;
++
++#ifdef INF_PATCH
++ 			 if (Gecko_Embed())
++          ::SetWindowPos(mWnd, HWND_BOTTOM, 0, 0, 0, 0, flags);
++          else {
+           HWND owner = ::GetWindow(mWnd, GW_OWNER);
+           ::SetWindowPos(mWnd, owner ? 0 : HWND_TOPMOST, 0, 0, 0, 0, flags);
++ 		 }
++#endif // INF_PATCH
++
+         } else {
+           if (mWindowType == eWindowType_dialog && !CanTakeFocus())
+             flags |= SWP_NOACTIVATE;
+ 
++#ifdef INF_PATCH
++          // Maintain exact window size we've asked for.
++          if (mWindowType == eWindowType_invisible)
++             flags |= SWP_NOMOVE|SWP_NOSIZE;
++#endif // INF_PATCH
++
+           ::SetWindowPos(mWnd, HWND_TOP, 0, 0, 0, 0, flags);
+         }
+       }
+@@ -2352,6 +2477,10 @@
+   else if (aPlacement == eZPlacementBelow && aWidget)
+     behind = (HWND)aWidget->GetNativeData(NS_NATIVE_WINDOW);
+   UINT flags = SWP_NOMOVE | SWP_NOREPOSITION | SWP_NOSIZE;
++#ifdef INF_PATCH
++  if (Gecko_Embed())
++      aActivate=FALSE;
++#endif // INF_PATCH
+   if (!aActivate) flags |= SWP_NOACTIVATE;
+ 
+   if (!CanTakeFocus() && behind == HWND_TOP) {
+@@ -3256,8 +3385,37 @@
+ 
+ // Setting the actual cursor
+ void nsWindow::SetCursor(const Cursor& aCursor) {
++
++#ifdef INF_PATCH
++
++  if (Gecko_Embed())
++  {
++      // TODO: Need eCursor_none defining so that webpage plugins can replace
++      // our cursor with their own when the cursor is over their surface.
++      
++	  if (mCursor != aCursor)
++	  {
++         UpdateInfo *info = _GetUpdateInfo(mWnd, true);
++
++         if (info)
++         {
++            // Hide Windows cursor ... this might not be required.
++            //::SetCursor(nullptr);
++			
++            info->SetCursor(mCursor == Cursor{eCursor_standard}); // for now.
++
++            _ReleaseUpdateInfo(info);
++         }
++		   
+   mCursor = aCursor;
+-
++      }
++
++      return;
++  }
++#endif // INF_PATCH
++
++  mCursor = aCursor;
++  
+   if (sCurrentCursor == aCursor && sCustomHCursor) {
+     ::SetCursor(sCustomHCursor);
+     return;
+@@ -3640,8 +3798,11 @@
+   nsCOMPtr<nsIScreen> screen = GetWidgetScreen();
+   int32_t x, y, width, height;
+   screen->GetRectDisplayPix(&x, &y, &width, &height);
+-  MOZ_ASSERT(BoundsUseDesktopPixels(),
+-             "Should only be called on top-level window");
++  
++  // INF_PATCH: Disabled becoz its a window type assert not expecting our invisible window type.
++  //MOZ_ASSERT(BoundsUseDesktopPixels(),
++    //         "Should only be called on top-level window");
++  
+   double scale = GetDesktopToDeviceScale().scale;  // XXX or GetDefaultScale() ?
+   initData.mBounds.SetRect(NSToIntRound(x * scale), NSToIntRound(y * scale),
+                            NSToIntRound(width * scale),
+@@ -3770,8 +3931,14 @@
+     case NS_NATIVE_WINDOW_WEBRTC_DEVICE_ID:
+       return (void*)mWnd;
+     case NS_NATIVE_GRAPHIC:
++#ifdef INF_PATCH
++       // NS_NATIVE_GRAPHIC isn't used so we patch here for now.
++       // TODO: Review purpose - popups ?
++       return mCompositorWidgetDelegate ? mCompositorWidgetDelegate->Surface_Pop() : nullptr;
++#else
+       MOZ_ASSERT_UNREACHABLE("Not supported on Windows:");
+       return nullptr;
++#endif // INF_PATCH
+     case NS_RAW_NATIVE_IME_CONTEXT: {
+       void* pseudoIMEContext = GetPseudoIMEContext();
+       if (pseudoIMEContext) {
+@@ -4313,8 +4480,14 @@
+   if (nullptr == aPoint) {  // use the point from the event
+     // get the message position in client coordinates
+     if (mWnd != nullptr) {
++		
++#ifdef INF_PATCH
++    DWORD pos = _GetMessagePos(mWnd);
++ 	POINT cpos;
++#else
+       DWORD pos = ::GetMessagePos();
+       POINT cpos;
++#endif // INF_PATCH
+ 
+       cpos.x = GET_X_LPARAM(pos);
+       cpos.y = GET_Y_LPARAM(pos);
+@@ -4777,16 +4950,33 @@
+   }
+ }
+ 
++#ifdef INF_PATCH
++HWND nsWindow::WindowAtMouse(HWND aWnd) {
++
++  HWND hroot = WinUtils::GetTopLevelHWND(aWnd);
++  DWORD pos = _GetMessagePos(hroot);
++  POINT mp;
++  mp.x = GET_X_LPARAM(pos);
++  mp.y = GET_Y_LPARAM(pos);
++  return (HWND) _WindowFromPoint(hroot, (void*) &mp);
++#else
+ HWND nsWindow::WindowAtMouse() {
+   DWORD pos = ::GetMessagePos();
+   POINT mp;
+   mp.x = GET_X_LPARAM(pos);
+   mp.y = GET_Y_LPARAM(pos);
+   return ::WindowFromPoint(mp);
+-}
++#endif // INF_PATCH
++}
++
+ 
+ bool nsWindow::IsTopLevelMouseExit(HWND aWnd) {
++
++#ifdef INF_PATCH
++  HWND mouseWnd = WindowAtMouse(aWnd);
++#else
+   HWND mouseWnd = WindowAtMouse();
++#endif // INF_PATCH
+ 
+   // WinUtils::GetTopLevelHWND() will return a HWND for the window frame
+   // (which includes the non-client area).  If the mouse has moved into
+@@ -5490,7 +5680,10 @@
+       break;
+ 
+     case WM_CLOSE:  // close request
++#ifndef INF_PATCH
+       if (mWidgetListener) mWidgetListener->RequestWindowClose(this);
++#endif
++     
+       result = true;  // abort window closure
+       break;
+ 
+@@ -5502,6 +5695,32 @@
+       break;
+ 
+     case WM_PAINT:
++
++#ifdef INF_PATCH
++      if (Gecko_Embed())
++      {
++         // ADV: Ensure gecko never paints windows direct - we work entirely from offscreen surfaces.
++         if (mWindowType == eWindowType_popup)
++         {
++            // TODO[OPT]: Popups don't require full update_info structure - just a simple update_available flag. 
++
++            UpdateInfo *info = _GetUpdateInfo(mWnd, true);
++
++            if (!info)
++            {
++               info = _CreateUpdateInfo(mWnd, nullptr);
++               info = _GetUpdateInfo(mWnd, true);
++            }
++
++            if (info)
++            {
++               info->RegisterFullUpdateRequired();
++               _ReleaseUpdateInfo(info);
++            }
++         }
++      }
++      else
++#endif // INF_PATCH
+       *aRetValue = (int)OnPaint(nullptr, 0);
+       result = true;
+       break;
+@@ -5656,7 +5875,11 @@
+       // clear sLastMouseMovePoint. This way the WM_MOUSEMOVE we get after the
+       // transition window disappears will not be ignored, even if the mouse
+       // hasn't moved.
++#ifdef INF_PATCH
++      if (mTransitionWnd && WindowAtMouse(mWnd) == mTransitionWnd) {
++#else
+       if (mTransitionWnd && WindowAtMouse() == mTransitionWnd) {
++#endif
+         sLastMouseMovePoint = {0};
+       }
+ 
+@@ -6656,9 +6879,24 @@
+       return NS_ERROR_INVALID_ARG;
+   }
+ 
++#ifdef INF_PATCH
++
++  LPARAM lp = MAKELPARAM(aPoint.x, aPoint.y);
++
++  if (aNativeMessage == NativeMouseMessage::Move)
++  {
++    DispatchMouseEvent(eMouseMove, 0, lp, false, aButton, 0, nullptr);
++  }
++  else if (aNativeMessage == NativeMouseMessage::ButtonDown)
++    DispatchMouseEvent(eMouseDown, 0, lp, false, aButton, 0, nullptr);
++  else if (aNativeMessage == NativeMouseMessage::ButtonUp)
++    DispatchMouseEvent(eMouseUp, 0, lp, false, aButton, 0, nullptr);
++
++#else
+   input.type = INPUT_MOUSE;
+   ::SetCursorPos(aPoint.x, aPoint.y);
+   ::SendInput(1, &input, sizeof(INPUT));
++#endif // INF_PATCH
+ 
+   return NS_OK;
+ }
+diff --git a/widget/windows/nsWindow.h b/widget/windows/nsWindow.h
+--- a/widget/windows/nsWindow.h
++++ b/widget/windows/nsWindow.h
+@@ -454,6 +454,9 @@
+   void DispatchTouchOrPanGestureInput(mozilla::MultiTouchInput& aTouchInput,
+                                       PTOUCHINPUT aOSEvent);
+ 
++#ifdef INF_PATCH
++   HWND mPopupParentPageNativeWindow;
++#endif // INF_PATCH  
+   /**
+    * Event handlers
+    */
+@@ -531,7 +534,13 @@
+    * Misc.
+    */
+   void StopFlashing();
++
++#ifdef INF_PATCH
++  static HWND WindowAtMouse(HWND aWnd);
++#else
+   static HWND WindowAtMouse();
++#endif
++
+   static bool IsTopLevelMouseExit(HWND aWnd);
+   virtual nsresult SetWindowClipRegion(
+       const nsTArray<LayoutDeviceIntRect>& aRects,
+diff --git a/xpcom/base/AppShutdown.cpp b/xpcom/base/AppShutdown.cpp
+--- a/xpcom/base/AppShutdown.cpp
++++ b/xpcom/base/AppShutdown.cpp
+@@ -130,6 +130,13 @@
+ }
+ 
+ void AppShutdown::MaybeDoRestart() {
++	
++#ifdef INF_PATCH
++    // Important: Not currently possible. Infinity app interface requires an upgrade to support apps that wish to restart themselves.
++    // As of right now this would create a disconnected zombie process tree & no interoperability, so we disable.
++   return;
++#endif // INF_PATCH
++	
+   if (sShutdownMode == AppShutdownMode::Restart) {
+     StopLateWriteChecks();
+ 
+diff --git a/xpcom/base/Logging.cpp b/xpcom/base/Logging.cpp
+--- a/xpcom/base/Logging.cpp
++++ b/xpcom/base/Logging.cpp
+@@ -828,6 +828,19 @@
+   }
+ }
+ 
++
++// INF_PATCH: Custom log filtering.
++bool LogModule::ShouldLog(LogLevel aLevel) const 
++{ 
++#if 0
++   if (strstr(mName, "Media"))
++      return true;
++#endif
++
++   return mLevel >= aLevel; 
++}
++
++
+ void LogModule::Init(int argc, char* argv[]) {
+   // NB: This method is not threadsafe; it is expected to be called very early
+   //     in startup prior to any other threads being run.
+diff --git a/xpcom/base/Logging.h b/xpcom/base/Logging.h
+--- a/xpcom/base/Logging.h
++++ b/xpcom/base/Logging.h
+@@ -122,7 +122,9 @@
+   /**
+    * Indicates whether or not the given log level is enabled.
+    */
+-  bool ShouldLog(LogLevel aLevel) const { return mLevel >= aLevel; }
++
++  // INF_PATCH: Implemented Logging.cpp so can tweak without requiring full rebuild.
++  bool ShouldLog(LogLevel aLevel) const;
+ 
+   /**
+    * Retrieves the log module's current level.
+diff --git a/xpcom/base/nsCrashOnException.cpp b/xpcom/base/nsCrashOnException.cpp
+--- a/xpcom/base/nsCrashOnException.cpp
++++ b/xpcom/base/nsCrashOnException.cpp
+@@ -24,10 +24,16 @@
+ XPCOM_API(LRESULT)
+ CallWindowProcCrashProtected(WNDPROC aWndProc, HWND aHWnd, UINT aMsg,
+                              WPARAM aWParam, LPARAM aLParam) {
++
++#if defined INF_PATCH && defined DEBUG
++   // Debugging - turn off crash protection so fault can be diagnosed.
++   return aWndProc(aHWnd, aMsg, aWParam, aLParam);
++#else
+   MOZ_SEH_TRY { return aWndProc(aHWnd, aMsg, aWParam, aLParam); }
+   MOZ_SEH_EXCEPT(ReportException(GetExceptionInformation())) {
+     ::TerminateProcess(::GetCurrentProcess(), 253);
+   }
++#endif // INF_PATCH
+   return 0;  // not reached
+ }
+ 
+diff --git a/xpcom/build/XPCOMInit.cpp b/xpcom/build/XPCOMInit.cpp
+--- a/xpcom/build/XPCOMInit.cpp
++++ b/xpcom/build/XPCOMInit.cpp
+@@ -301,10 +301,10 @@
+     sMessageLoop->set_thread_name("Gecko");
+     // Set experimental values for main thread hangs:
+     // 128ms for transient hangs and 8192ms for permanent hangs
+-    sMessageLoop->set_hang_timeouts(128, 8192);
++    sMessageLoop->set_hang_timeouts(0, 0);  // INF_PATCH
+   } else if (messageLoop->type() == MessageLoop::TYPE_MOZILLA_CHILD) {
+     messageLoop->set_thread_name("Gecko_Child");
+-    messageLoop->set_hang_timeouts(128, 8192);
++    messageLoop->set_hang_timeouts(0, 0);  // INF_PATCH
+   }
+ 
+   if (XRE_IsParentProcess() &&
+diff --git a/xpcom/components/nsServiceManagerUtils.h b/xpcom/components/nsServiceManagerUtils.h
+--- a/xpcom/components/nsServiceManagerUtils.h
++++ b/xpcom/components/nsServiceManagerUtils.h
+@@ -30,7 +30,12 @@
+ 
+ nsresult CallGetService(const nsCID& aClass, const nsIID& aIID, void** aResult);
+ 
+-nsresult CallGetService(const char* aContractID, const nsIID& aIID,
++#ifdef INF_PATCH
++XPCOM_API(nsresult) 
++#else
++nsresult
++#endif // INF_PATCH
++CallGetService(const char* aContractID, const nsIID& aIID,
+                         void** aResult);
+ 
+ // type-safe shortcuts for calling |GetService|
+diff --git a/xpfe/appshell/AppWindow.cpp b/xpfe/appshell/AppWindow.cpp
+--- a/xpfe/appshell/AppWindow.cpp
++++ b/xpfe/appshell/AppWindow.cpp
+@@ -146,6 +146,9 @@
+       mPersistentAttributesDirty(0),
+       mPersistentAttributesMask(0),
+       mChromeFlags(aChromeFlags),
++#ifdef INF_PATCH
++      m_user(nullptr),
++#endif
+       mSPTimerLock("AppWindow.mSPTimerLock"),
+       mWidgetListenerDelegate(this) {}
+ 
+@@ -725,6 +728,7 @@
+   DesktopToLayoutDeviceScale scale = mWindow->GetDesktopToDeviceScale();
+   DesktopSize size = LayoutDeviceIntSize(aCX, aCY) / scale;
+   mWindow->Resize(size.width, size.height, aRepaint);
++
+   if (mSizingShellFromXUL) {
+     // If we're invoked for sizing from XUL, we want to neither ignore anything
+     // nor persist anything, since it's already the value in XUL.
+@@ -2615,6 +2619,7 @@
+   loadValue(nsGkAtoms::sizemode);
+ }
+ 
++
+ void AppWindow::SizeShell() {
+   AutoRestore<bool> sizingShellFromXUL(mSizingShellFromXUL);
+   mSizingShellFromXUL = true;
+@@ -2668,6 +2673,7 @@
+   }
+ 
+   if (mIntrinsicallySized) {
++
+     // (if LoadSizeFromXUL set the size, mIntrinsicallySized will be false)
+     nsCOMPtr<nsIContentViewer> cv;
+     mDocShell->GetContentViewer(getter_AddRefs(cv));
+@@ -2679,6 +2685,7 @@
+         // GetContentSize can fail, so initialise |width| and |height| to be
+         // on the safe side.
+         int32_t width = 0, height = 0;
++
+         if (NS_SUCCEEDED(cv->GetContentSize(&width, &height))) {
+           treeOwner->SizeShellTo(docShell, width, height);
+           // Update specified size for the final LoadPositionFromXUL call.
+@@ -2941,6 +2948,11 @@
+   if (mDocShell) {
+     if (nsCOMPtr<nsPIDOMWindowOuter> ourWindow = mDocShell->GetWindow()) {
+       ourWindow->FinishFullscreenChange(aInFullscreen);
++
++#ifdef INF_PATCH
++      void *instance_ptr = GetEmbedUserData();
++      Gecko_SetFullScreen(instance_ptr, aInFullscreen);
++#endif
+     }
+   }
+ }
+diff --git a/xpfe/appshell/nsAppShellService.cpp b/xpfe/appshell/nsAppShellService.cpp
+--- a/xpfe/appshell/nsAppShellService.cpp
++++ b/xpfe/appshell/nsAppShellService.cpp
+@@ -174,8 +174,16 @@
+   StartupTimeline::RecordOnce(StartupTimeline::CREATE_TOP_LEVEL_WINDOW);
+ 
+   RefPtr<AppWindow> newWindow;
++// INF_PATCH[BEGIN]
+   rv = JustCreateTopWindow(aParent, aUrl, aChromeMask, aInitialWidth,
+-                           aInitialHeight, false, getter_AddRefs(newWindow));
++                           aInitialHeight,  
++#ifdef INF_PATCH
++      Gecko_Embed(), // Hidden window when embedded
++#endif // INF_PATCH
++
++ getter_AddRefs(newWindow));
++ 
++
+   newWindow.forget(aResult);
+ 
+   if (NS_SUCCEEDED(rv)) {
+@@ -445,6 +453,13 @@
+    * a stub implementation of nsIWidget.
+    */
+   nsCOMPtr<nsIWidget> widget;
++
++#ifdef INF_PATCH
++
++  widget = nsIWidget::CreateTopLevelWindow();
++
++#else
++
+   if (gfxPlatform::IsHeadless()) {
+     widget = nsIWidget::CreateHeadlessWidget();
+   } else {
+@@ -454,6 +469,7 @@
+     NS_ERROR("Couldn't create instance of stub widget");
+     return NS_ERROR_FAILURE;
+   }
++#endif
+ 
+   nsresult rv =
+       widget->Create(nullptr, 0, LayoutDeviceIntRect(0, 0, 0, 0), nullptr);
+# HG changeset patch
+# User stevew <steve@advance-software.com>
+# Date 1641306795 0
+#      Tue Jan 04 14:33:15 2022 +0000
+# Node ID 236918cb4e1ee33fddd293ad27efcfc71edbedbc
+# Parent  cf8d47dffc8fe2153d3dcee77e53e1c17d331b6a
+refine
+
+diff --git a/layout/generic/nsGfxScrollFrame.cpp b/layout/generic/nsGfxScrollFrame.cpp
+--- a/layout/generic/nsGfxScrollFrame.cpp
++++ b/layout/generic/nsGfxScrollFrame.cpp
+@@ -2735,10 +2735,6 @@
+   ResetDisplayPortExpiryTimer();
+ }
+ 
+-#ifdef INF_PATCH
+-#include "_update_info.h"
+-#include "adv_sw_patch.h"
+-#endif // INF_PATCH
+ 
+ void ScrollFrameHelper::ScrollVisual() {
+   MarkEverScrolled();
+diff --git a/widget/windows/WinMouseScrollHandler.cpp b/widget/windows/WinMouseScrollHandler.cpp
+--- a/widget/windows/WinMouseScrollHandler.cpp
++++ b/widget/windows/WinMouseScrollHandler.cpp
+@@ -245,7 +245,7 @@
+   pt.y = aPoint.y;
+ 
+ #ifdef INF_PATCH
+-  HWND target = useFocusedWindow ? (HWND) _WindowFromPoint(aWidget ? aWidget->GetWindowHandle() : nullptr, (void*) &pt) : ::GetFocus();
++  HWND target = useFocusedWindow ? (HWND) _WindowFromPoint(aWidget->GetWindowHandle(), (void*) &pt) : ::GetFocus();
+ #else
+   HWND target = useFocusedWindow ? ::WindowFromPoint(pt) : ::GetFocus();
+ #endif // INF_PATCH
+@@ -393,7 +393,7 @@
+   MaybeLogKeyState();
+ 
+ #ifdef INF_PATCH
+-  HWND underCursorWnd = (HWND) _WindowFromPoint(aWidget ? aWidget->GetWindowHandle() : nullptr, (void*) &point);
++  HWND underCursorWnd = (HWND) _WindowFromPoint(aWidget->GetWindowHandle(), (void*) &point);
+ #else
+   HWND underCursorWnd = ::WindowFromPoint(point);
+ #endif // INF_PATCH
+diff --git a/widget/windows/nsWindow.cpp b/widget/windows/nsWindow.cpp
+--- a/widget/windows/nsWindow.cpp
++++ b/widget/windows/nsWindow.cpp
+@@ -5890,13 +5890,24 @@
+                           (GetKeyState(VK_RBUTTON) ? MK_RBUTTON : 0);
+       // Synthesize an event position because we don't get one from
+       // WM_MOUSELEAVE.
++#ifdef INF_PATCH
++      LPARAM pos = lParamToClient(_GetMessagePos(mWnd));
++#else
+       LPARAM pos = lParamToClient(::GetMessagePos());
++#endif // INF_PATCH
++
+       DispatchMouseEvent(eMouseExitFromWidget, mouseState, pos, false,
+                          MouseButton::ePrimary, MOUSE_INPUT_SOURCE());
+     } break;
+ 
+     case MOZ_WM_PEN_LEAVES_HOVER_OF_DIGITIZER: {
++
++#ifdef INF_PATCH
++       LPARAM pos = lParamToClient(_GetMessagePos(mWnd));
++#else
+       LPARAM pos = lParamToClient(::GetMessagePos());
++#endif // INF_PATCH
++
+       MOZ_ASSERT(InkCollector::sInkCollector);
+       uint16_t pointerId = InkCollector::sInkCollector->GetPointerId();
+       if (pointerId != 0) {
+@@ -5927,7 +5938,13 @@
+       bool contextMenukey = false;
+       if (lParam == -1) {
+         contextMenukey = true;
++
++#ifdef INF_PATCH
++        pos = lParamToClient(_GetMessagePos(mWnd));
++#else
+         pos = lParamToClient(GetMessagePos());
++#endif // INF_PATCH
++
+       } else {
+         pos = lParamToClient(lParam);
+       }
+@@ -8299,6 +8316,13 @@
+                                    Maybe<POINT> aEventPoint) {
+   RECT r;
+   ::GetWindowRect(aWindow->mWnd, &r);
++
++#ifdef INF_PATCH
++  DWORD pos = _GetMessagePos(aWindow->mWnd);
++#else
++  DWORD pos = GetMessagePos();
++#endif // INF_PATCH
++
+   POINT mp;
+   if (aEventPoint) {
+     mp = *aEventPoint;
+# HG changeset patch
+# User stevew <steve@advance-software.com>
+# Date 1641310746 0
+#      Tue Jan 04 15:39:06 2022 +0000
+# Node ID 0cf5d821af4f9eb32be55e6d1151d7d991bbd825
+# Parent  236918cb4e1ee33fddd293ad27efcfc71edbedbc
+dynamic patching propagated to child processes :)
+
+diff --git a/gfx/layers/d3d11/CompositorD3D11.cpp b/gfx/layers/d3d11/CompositorD3D11.cpp
+--- a/gfx/layers/d3d11/CompositorD3D11.cpp
++++ b/gfx/layers/d3d11/CompositorD3D11.cpp
+@@ -43,7 +43,7 @@
+ 
+ #ifdef INF_PATCH
+ 
+-bool Gecko_Embed();
++bool __cdecl Gecko_Embed();
+ void _cdecl Infinity_Log(size_t id, const char *format, ...);
+ 
+ #include "../../../widget/windows/CompositorWidgetParent.h"
+@@ -1168,7 +1168,7 @@
+ 
+ #ifdef INF_PATCH
+          // TODO[OPT]: Don't composite when parent (infinity) is minimized.
+-         if (0) // if (!Gecko_Embed()) // TODO: State not propagated thus processes yet.
++         if (!Gecko_Embed())
+          {
+ #endif // INF_PATCH
+ 
+@@ -1629,7 +1629,7 @@
+ 
+ #ifdef INF_PATCH
+ 
+-         if (1) // if (Gecko_Embed()) // TODO: State not propogated thru processes yet.
++         if (Gecko_Embed())
+          {
+             if (m_dimensions_changed)
+             {
+@@ -1658,7 +1658,7 @@
+ 
+          // TODO: Factor this down to minimize the chance of merge errors.
+ 
+-         if (1) //if (Gecko_Embed()) // TODO: State not propogates thru processes yet.
++         if (Gecko_Embed())
+          {
+              backBuf = (ID3D11Texture2D *) m_status.m_native_destination;
+ 
+@@ -1674,7 +1674,7 @@
+ 
+                if (m_producer_mutex) {
+                  m_producer_mutex->Release();
+-                 //m_producer_mutex = nullptr;
++                 m_producer_mutex = nullptr;
+                }
+             }
+ 
+diff --git a/toolkit/xre/nsAppRunner.cpp b/toolkit/xre/nsAppRunner.cpp
+--- a/toolkit/xre/nsAppRunner.cpp
++++ b/toolkit/xre/nsAppRunner.cpp
+@@ -253,8 +253,6 @@
+ bool __cdecl Gecko_App_Init();
+ void __cdecl Program_Complete();
+ void _cdecl Program_Terminate();
+-bool __gecko_app = false;
+-
+ 
+ // For getenv
+ #include <stdlib.h>     
+@@ -262,31 +260,22 @@
+ static bool __patch_initialized = false;
+ static bool __is_patch_active = false;
+ 
+-bool __cdecl xGecko_Embed()
++// Use this is downstream processes such as Compositor.
++bool __cdecl Gecko_Embed()
+ {
+    if (!__patch_initialized)
+    {
+       auto value = getenv("MOZ_GECKO_SERVER");
+-      
+-	  __is_patch_active = value && (value[0] != '\0');
+-	  
++	   __is_patch_active = value && (value[0] != '\0');
+       __patch_initialized = true;
+    }
+ 
+    return __is_patch_active;
+ }
+ 
+-
+-// Note this currently only works in the root process.
+-// TODO: IPC propogate state thru to child processes or use environment variable.
+-bool __cdecl Gecko_Embed()
+-{
+-	return __gecko_app;
+-}
+-
+ // BCryptGenRandom unresolved without this.
+ #pragma comment(lib, "Bcrypt.lib") 
+-// TODO: Remove from mozwer.cpp - better here as works with old version too.
++// TODO: Currently dupe in mozwer.cpp
+ 
+ #endif // INF_PATCH
+ 
+@@ -4054,10 +4043,13 @@
+      if (CheckArg("infinity"))
+      {
+         Infinity_Log(INF_LOG_DEFAULT, INF_INFO, "<><> Gecko Server.");
+-        __gecko_app = true;
++
++        // Set directly in root processes. Downstream processes pick up environment variable.
++        __patch_initialized = true;
++        __is_patch_active = true;
+      }
+      
+-     if (__gecko_app)
++     if (__is_patch_active)
+      {
+         Gecko_App_Init();
+      }
+@@ -5566,7 +5558,7 @@
+   int result = main.XRE_main(argc, argv, aConfig);
+ 
+ #ifdef INF_PATCH
+-  if (__gecko_app)
++  if (__is_patch_active)
+       Program_Complete();
+ #endif // INF_PATCH
+ 
+@@ -5578,7 +5570,7 @@
+ #endif
+ 
+ #ifdef INF_PATCH
+-  if (__gecko_app)
++  if (__is_patch_active)
+      Program_Terminate();
+ #endif // INF_PATCH
+ 
+# HG changeset patch
+# User stevew <steve@advance-software.com>
+# Date 1641640966 0
+#      Sat Jan 08 11:22:46 2022 +0000
+# Node ID 0b7759383a076f5d38d97f9f142a32a07822e618
+# Parent  0cf5d821af4f9eb32be55e6d1151d7d991bbd825
+bits we want following firefox js path consideration.
+
+diff --git a/browser/components/BrowserGlue.jsm b/browser/components/BrowserGlue.jsm
+--- a/browser/components/BrowserGlue.jsm
++++ b/browser/components/BrowserGlue.jsm
+@@ -750,10 +750,31 @@
+ };
+ 
+ (function earlyBlankFirstPaint() {
++
+   // INF_PATCH[BEGIN]
++  
++  // FIREFOX/js bootstrap entry function.
++  
++  // Load firefox GUI & performs its chrome initialize which we don't want.
++  // Also initializes window.FullScreen file: "resource:///actors/DOMFullscreenParent.jsm" line: 132
++  // ... which firefox uses for fullscreen transitions.
++  
++  // earlyBlankFirstPaint is a terrible name for this function. should be called firefox_init 
++  // - firefox specific stuff which gecko server doesn't use ... hence :
++  
+   let env = Cc["@mozilla.org/process/environment;1"].getService(Ci.nsIEnvironment);
++
+   if (env.get("MOZ_GECKO_SERVER"))
+    return;	
++  
++  // --------------------------------------------------------------------------------
++  // DEBUGGING. To exit js function with a mini-stack in debug output.
++  // js: throw new Error("[JS] my_marker");
++  
++  // Can get a full stack on the other side in debug output with :
++  // c++: xpc_DumpJSStack(true, true, false); 
++  // --------------------------------------------------------------------------------
++	
+   // INF_PATCH[END] 
+ 
+   let startTime = Cu.now();
+diff --git a/gfx/layers/d3d11/CompositorD3D11.cpp b/gfx/layers/d3d11/CompositorD3D11.cpp
+--- a/gfx/layers/d3d11/CompositorD3D11.cpp
++++ b/gfx/layers/d3d11/CompositorD3D11.cpp
+@@ -1128,6 +1128,7 @@
+     const nsIntRegion& aInvalidRegion, const Maybe<IntRect>& aClipRect,
+     const IntRect& aRenderBounds, const nsIntRegion& aOpaqueRegion) {
+   MOZ_RELEASE_ASSERT(!mTarget, "mTarget not cleared properly");
++
+   return BeginFrame(aInvalidRegion, aClipRect, aRenderBounds, aOpaqueRegion);
+ }
+ 
+@@ -1530,9 +1531,9 @@
+ #ifdef INF_PATCH
+ void CompositorD3D11::EnsureSize()
+ {
+-         auto rect = mWidget->GetClientSize();
+-         m_dimensions_changed = (mSize.width != rect.width) || (mSize.height != rect.height);
+-         mSize = rect;
++   auto rect = mWidget->GetClientSize();
++   m_dimensions_changed = (mSize.width != rect.width) || (mSize.height != rect.height);
++   mSize = rect;
+ }
+ #else
+ void CompositorD3D11::EnsureSize() { mSize = mWidget->GetClientSize(); }
+@@ -1662,8 +1663,7 @@
+          {
+              backBuf = (ID3D11Texture2D *) m_status.m_native_destination;
+ 
+-            // Reallocate if surface dimensions have changed
+-            // TODO[?]: Might need to mutex or critical section this.
++            // Reallocate when required ...
+             if (backBuf && m_dimensions_changed)
+             {
+                m_status.m_native_destination = nullptr;
+@@ -1673,8 +1673,9 @@
+                backBuf = nullptr;
+ 
+                if (m_producer_mutex) {
+-                 m_producer_mutex->Release();
++                 auto mut = m_producer_mutex;
+                  m_producer_mutex = nullptr;
++                 mut->Release();
+                }
+             }
+ 
+diff --git a/gfx/thebes/gfxWindowsPlatform.cpp b/gfx/thebes/gfxWindowsPlatform.cpp
+--- a/gfx/thebes/gfxWindowsPlatform.cpp
++++ b/gfx/thebes/gfxWindowsPlatform.cpp
+@@ -390,7 +390,8 @@
+   // INF_PATCH: WebRender not patched yet - we currently require the D3D11 compositor.
+   if (XRE_IsParentProcess())
+   {
+-      if (Gecko_Embed())
++      // Our fork of firefox also uses D3D11 Compositor for now so we can compare flows directly.
++	  if (1) //Gecko_Embed())
+       {
+          gfxVars::SetUseWebRender(false);
+          return;
+diff --git a/js/xpconnect/src/Sandbox.cpp b/js/xpconnect/src/Sandbox.cpp
+--- a/js/xpconnect/src/Sandbox.cpp
++++ b/js/xpconnect/src/Sandbox.cpp
+@@ -182,8 +182,23 @@
+ #ifdef ANDROID
+   __android_log_write(ANDROID_LOG_INFO, "GeckoDump", cstr);
+ #endif
++
++// INF_PATCH
++#ifdef XP_WIN
++
++    // Content process javascript dump function ends up here.
++    // Use: dump("hello world !"); 
++
++    if (IsDebuggerPresent())
++      OutputDebugStringA(cstr);
++   
++    // Note: The following doesn't currently work as child process console logging
++    // isn't currently configured correctly, so have to look in VStudio Output window.
++#endif
++
+   fputs(cstr, stdout);
+   fflush(stdout);
++
+   args.rval().setBoolean(true);
+   return true;
+ }
+diff --git a/toolkit/components/windowwatcher/nsWindowWatcher.cpp b/toolkit/components/windowwatcher/nsWindowWatcher.cpp
+--- a/toolkit/components/windowwatcher/nsWindowWatcher.cpp
++++ b/toolkit/components/windowwatcher/nsWindowWatcher.cpp
+@@ -276,6 +276,13 @@
+   return singletonArray.forget();
+ }
+ 
++
++#ifdef INF_PATCH
++// - DEBUGGING - use this to get a js stack in debugger output window.
++extern bool xpc_DumpJSStack(bool showArgs, bool showLocals, bool showThisProps);
++#endif // INF_PATCH
++
++
+ NS_IMETHODIMP
+ nsWindowWatcher::OpenWindow(mozIDOMWindowProxy* aParent, const nsACString& aUrl,
+                             const nsACString& aName,
+@@ -284,12 +291,19 @@
+                             mozIDOMWindowProxy** aResult) {
+ 
+ #if INF_PATCH_OFF
+-   // Block all js windows for now.
+-   auto pos = aName.FindChar('i'); // will have to do for now.  TODO: check inf_ (no strncmp equivalent so char by char).
++
++   // Ideal: Block all js initialize "windows" - do not want. We're not firefox.
++   // "EarlyBlankFirstPaint" in BrowserGlue.jsm fires up all their stuff. 
++   auto pos = aName.FindChar('i'); // For now. TODO: check inf_ (no strncmp equivalent(?) so char by char).
+   
+    if (pos != 0)
+       return NS_ERROR_FAILURE; //NS_OK; NS_ERROR_UNEXPECTED
+-#endif
++
++   // DEBUGGING: Use this to get a js stack in debugger output window.
++   // That lets us know where window opens invoked from js come from.
++   //xpc_DumpJSStack(true, true, false);
++
++#endif // INF_PATCH
+ 
+   nsCOMPtr<nsIArray> argv = ConvertArgsToArray(aArguments);
+ 
+diff --git a/widget/windows/nsLookAndFeel.cpp b/widget/windows/nsLookAndFeel.cpp
+--- a/widget/windows/nsLookAndFeel.cpp
++++ b/widget/windows/nsLookAndFeel.cpp
+@@ -344,7 +344,8 @@
+       idx = COLOR_HOTLIGHT;
+       break;
+     default:
+-      NS_WARNING("Unknown color for nsLookAndFeel");
++      // INF_PATCH: Don't care, too much output.
++      //NS_WARNING("Unknown color for nsLookAndFeel");
+       idx = COLOR_WINDOW;
+       res = NS_ERROR_FAILURE;
+       break;
+# HG changeset patch
+# User stevew <steve@advance-software.com>
+# Date 1641818610 0
+#      Mon Jan 10 12:43:30 2022 +0000
+# Node ID d80886af10113c1c13c3298277c9dcbb30efdb5f
+# Parent  0b7759383a076f5d38d97f9f142a32a07822e618
+gets gecko fullscreen mode working. just. needs element sizing & restore fixing & re-entrancy  to complete.
+
+diff --git a/dom/base/nsGlobalWindowOuter.cpp b/dom/base/nsGlobalWindowOuter.cpp
+--- a/dom/base/nsGlobalWindowOuter.cpp
++++ b/dom/base/nsGlobalWindowOuter.cpp
+@@ -4660,9 +4660,9 @@
+           aWidget->MakeFullScreenWithNativeTransition(aIsFullscreen, aScreen)
+           : aWidget->MakeFullScreen(aIsFullscreen, aScreen);
+ 
+-
+ #ifdef INF_PATCH
+    Gecko_SetFullScreen(aWidget, aIsFullscreen);
++   return false; // Proceed with full screen transition directly.
+ #endif
+ 
+   return NS_SUCCEEDED(rv);
+# HG changeset patch
+# User stevew <steve@advance-software.com>
+# Date 1642165571 0
+#      Fri Jan 14 13:06:11 2022 +0000
+# Node ID a6192f216690cdedcf63be36e2a630798cda7bb6
+# Parent  d80886af10113c1c13c3298277c9dcbb30efdb5f
+wip - full screen - input resolves correctly, child elements not removed yet. not known why.
+
+diff --git a/dom/base/Element.cpp b/dom/base/Element.cpp
+--- a/dom/base/Element.cpp
++++ b/dom/base/Element.cpp
+@@ -3323,6 +3323,33 @@
+   }
+ }
+ 
++
++#ifdef INF_PATCH
++void Embed_FullScreen(Element *e, bool enable)
++{
++   ErrorResult err;
++   nsAutoString token(L"style"); nsAutoString value(L"height: 80vh; width: 96vw; border:0");
++   e->SetAttribute(token, value, err);
++
++   Document* doc = e->OwnerDoc(); // e->GetComposedDoc();
++   doc->SetRootOverride(e);
++
++   while (e->HasChildren()) 
++   {
++     nsCOMPtr<nsIContent> child = e->GetLastChild();
++     e->RemoveChildNode(child, true);
++
++     //e->DisconnectChild(child);
++     child->UnbindFromTree();
++   }
++
++   // No idea if necessary.
++   PresShell* presShell = doc->GetPresShell();
++   presShell->FlushPendingNotifications(FlushType::Layout); // FlushType::Style // FlushType::Frames ?
++}
++#endif
++
++
+ already_AddRefed<Promise> Element::RequestFullscreen(CallerType aCallerType,
+                                                      ErrorResult& aRv) {
+   auto request = FullscreenRequest::Create(this, aCallerType, aRv);
+@@ -3338,6 +3365,11 @@
+   if (const char* error = GetFullscreenError(aCallerType, OwnerDoc())) {
+     request->Reject(error);
+   } else {
++
++#ifdef INF_PATCH
++     Embed_FullScreen(this, true);
++#endif
++
+     OwnerDoc()->AsyncRequestFullscreen(std::move(request));
+   }
+   return promise.forget();
+# HG changeset patch
+# User stevew <steve@advance-software.com>
+# Date 1642267106 0
+#      Sat Jan 15 17:18:26 2022 +0000
+# Node ID 89a2635ceb4fbb27f700d668d855888c955264b6
+# Parent  a6192f216690cdedcf63be36e2a630798cda7bb6
+embed fuill screen working - basic - doesn't revert properly yet.
+
+diff --git a/dom/base/Element.cpp b/dom/base/Element.cpp
+--- a/dom/base/Element.cpp
++++ b/dom/base/Element.cpp
+@@ -188,6 +188,11 @@
+ #  include "nsAccessibilityService.h"
+ #endif
+ 
++
++#ifdef INF_PATCH
++bool __cdecl Gecko_Embed();
++#endif
++
+ using mozilla::gfx::Matrix4x4;
+ 
+ namespace mozilla::dom {
+@@ -3325,27 +3330,47 @@
+ 
+ 
+ #ifdef INF_PATCH
++
++ //nsresult rv = newElement->SetAttr(kNameSpaceID_None, nsGkAtoms::_class, u"hidden"_ns, true);
++
++void HTML_Inspect(Element *e, bool active) 
++{
++  nsAutoScriptBlocker scriptBlocker;
++
++  Document* doc = e->OwnerDoc();
++  HTMLBodyElement* body = doc->GetBodyElement();
++
++  // TODO: Maintain reference to previous body elements or mark each display::none whilst inspect active.
++  while (body->HasChildren()) {
++    nsIContent* node = body->GetFirstChild();
++    node->Remove();
++  }
++
++  e->Remove();
++  mozilla::ErrorResult rv;
++  static_cast<nsINode*>(body)->AppendChild(*static_cast<nsINode*>(e), rv);
++}
++
++
+ void Embed_FullScreen(Element *e, bool enable)
+ {
+    ErrorResult err;
+-   nsAutoString token(L"style"); nsAutoString value(L"height: 80vh; width: 96vw; border:0");
++   nsAutoString token(L"style"); nsAutoString value(L"height: 98vh; width: 98vw; border:0;margin:0;padding:0");
+    e->SetAttribute(token, value, err);
+ 
+-   Document* doc = e->OwnerDoc(); // e->GetComposedDoc();
+-   doc->SetRootOverride(e);
+-
+-   while (e->HasChildren()) 
+-   {
+-     nsCOMPtr<nsIContent> child = e->GetLastChild();
+-     e->RemoveChildNode(child, true);
+-
+-     //e->DisconnectChild(child);
+-     child->UnbindFromTree();
+-   }
++   Document* doc = e->OwnerDoc();
++   HTML_Inspect(e, true);
++
++   PresShell* presShell = doc->GetPresShell();
++
++  // TODO: Restyle with full screen styling - something like this.
++   //nsPresContext* presContext = presShell->GetPresContext();
++   //nsCSSFrameConstructor* frameConstructor = presContext->FrameConstructor();
++   //frameConstructor->RecreateFramesForContent(e,nsCSSFrameConstructor::InsertionKind::Sync);
+ 
+    // No idea if necessary.
+-   PresShell* presShell = doc->GetPresShell();
+-   presShell->FlushPendingNotifications(FlushType::Layout); // FlushType::Style // FlushType::Frames ?
++   presShell->FlushPendingNotifications(FlushType::Style);
++   presShell->FlushPendingNotifications(FlushType::Layout);
+ }
+ #endif
+ 
+@@ -3367,7 +3392,8 @@
+   } else {
+ 
+ #ifdef INF_PATCH
+-     Embed_FullScreen(this, true);
++   if (Gecko_Embed())
++      Embed_FullScreen(this, true);
+ #endif
+ 
+     OwnerDoc()->AsyncRequestFullscreen(std::move(request));
+diff --git a/mfbt/Vector.h b/mfbt/Vector.h
+--- a/mfbt/Vector.h
++++ b/mfbt/Vector.h
+@@ -889,9 +889,14 @@
+ /* Move assignment. */
+ template <typename T, size_t N, class AP>
+ MOZ_ALWAYS_INLINE Vector<T, N, AP>& Vector<T, N, AP>::operator=(Vector&& aRhs) {
+-  MOZ_ASSERT(this != &aRhs, "self-move assignment is prohibited");
+-  this->~Vector();
+-  new (KnownNotNull, this) Vector(std::move(aRhs));
++
++  // INF_PATCH
++  if (this != &aRhs)
++  {
++	  this->~Vector();
++	  new (KnownNotNull, this) Vector(std::move(aRhs));
++  }
++  
+   return *this;
+ }
+ 
+# HG changeset patch
+# User stevew <steve@advance-software.com>
+# Date 1642267206 0
+#      Sat Jan 15 17:20:06 2022 +0000
+# Node ID 141ea0516d10a7977ca04ca5978545cc09366f2d
+# Parent  89a2635ceb4fbb27f700d668d855888c955264b6
+basic embed full screen.
+
+diff --git a/dom/base/nsGlobalWindowOuter.cpp b/dom/base/nsGlobalWindowOuter.cpp
+--- a/dom/base/nsGlobalWindowOuter.cpp
++++ b/dom/base/nsGlobalWindowOuter.cpp
+@@ -258,6 +258,7 @@
+ 
+ #ifdef INF_PATCH
+ #include "adv_sw_patch_prompt.h"
++bool __cdecl Gecko_Embed();
+ #endif // INF_PATCH
+ 
+ #ifdef ANDROID
+@@ -4652,6 +4653,7 @@
+       }
+     }
+   }
++
+   nsresult rv =
+       aReason == FullscreenReason::ForFullscreenMode
+           ?
+@@ -4661,8 +4663,15 @@
+           : aWidget->MakeFullScreen(aIsFullscreen, aScreen);
+ 
+ #ifdef INF_PATCH
+-   Gecko_SetFullScreen(aWidget, aIsFullscreen);
+-   return false; // Proceed with full screen transition directly.
++   if (Gecko_Embed())
++   {
++      Gecko_SetFullScreen(aWidget, aIsFullscreen);
++      
++      // Required bcoz standard fullscreen transition has complex js dependencies.
++      // Hence we deliver the simple way.
++
++      return false; // Skip most fullscreen transition codepaths. Displays regular element.
++   }
+ #endif
+ 
+   return NS_SUCCEEDED(rv);
+# HG changeset patch
+# User stevew <steve@advance-software.com>
+# Date 1642267247 0
+#      Sat Jan 15 17:20:47 2022 +0000
+# Node ID 4b3cdc372f3b1b48d438b5955b95802c8d77dad9
+# Parent  141ea0516d10a7977ca04ca5978545cc09366f2d
+ ,
+
+diff --git a/browser/components/BrowserContentHandler.jsm b/browser/components/BrowserContentHandler.jsm
+--- a/browser/components/BrowserContentHandler.jsm
++++ b/browser/components/BrowserContentHandler.jsm
+@@ -219,7 +219,7 @@
+   postData = null,
+   forcePrivate = false
+ ) {
+-  // INF_PATCH: Block unwanted content pushes. 
++  // INF_PATCH: Block unwanted content pushes - stop firefox browser application injecting itself.
+   let env = Cc["@mozilla.org/process/environment;1"].getService(Ci.nsIEnvironment);
+   if (env.get("MOZ_GECKO_SERVER"))
+     return false;	
+# HG changeset patch
+# User stevew <steve@advance-software.com>
+# Date 1642444416 0
+#      Mon Jan 17 18:33:36 2022 +0000
+# Node ID 292b8bf9bbb1170776688d690e0a4f7d736d4b4a
+# Parent  4b3cdc372f3b1b48d438b5955b95802c8d77dad9
+embed fullscreen almost there :)
+
+diff --git a/dom/base/Element.cpp b/dom/base/Element.cpp
+--- a/dom/base/Element.cpp
++++ b/dom/base/Element.cpp
+@@ -3331,46 +3331,85 @@
+ 
+ #ifdef INF_PATCH
+ 
+- //nsresult rv = newElement->SetAttr(kNameSpaceID_None, nsGkAtoms::_class, u"hidden"_ns, true);
+-
+-void HTML_Inspect(Element *e, bool active) 
++ void HTML_Inspect(Element *e, bool active) 
+ {
+   nsAutoScriptBlocker scriptBlocker;
+ 
+   Document* doc = e->OwnerDoc();
+   HTMLBodyElement* body = doc->GetBodyElement();
+ 
+-  // TODO: Maintain reference to previous body elements or mark each display::none whilst inspect active.
+-  while (body->HasChildren()) {
+-    nsIContent* node = body->GetFirstChild();
+-    node->Remove();
+-  }
+-
+-  e->Remove();
++  const nsAutoString css_style(L"style");
++  
++  ErrorResult err;
+   mozilla::ErrorResult rv;
+-  static_cast<nsINode*>(body)->AppendChild(*static_cast<nsINode*>(e), rv);
++
++  static std::vector<RefPtr<nsIContent>> __prev_body;
++  static nsAutoString __prev_element_style(L"");
++  static nsAutoString __prev_body_style(L"");
++  static RefPtr<nsINode> __prev_parent = nullptr;
++
++  PresShell* presShell = doc->GetPresShell();
++
++  if (active)
++  {
++      e->GetAttribute(css_style, __prev_element_style);
++     __prev_parent = e->GetParentNode(); e->AddRef();
++
++     // Remove previous body elements, keeping a reference so they're not garbage collected.
++     while (body->HasChildren()) {
++       auto node = body->GetFirstChild();
++       __prev_body.push_back(node);
++       node->AddRef();
++       node->Remove();
++     }
++
++     e->Remove();
++     static_cast<nsINode*>(body)->AppendChild(*static_cast<nsINode*>(e), rv);
++
++     body->GetAttribute(css_style, __prev_body_style);
++      nsAutoString body_style_fs(
++         L"width: vw; vh; border:0;margin:0;padding:0;background-color: rgb(0,0,0);");
++     body->SetAttribute(css_style, body_style_fs, err);
++
++     nsAutoString element_style_fs(L"width: 100%; height: 100%; border:0;margin:0;padding:0");
++     e->SetAttribute(css_style, element_style_fs, err);
++  }
++  else
++  {
++    e->Remove(); // Unpin
++    static_cast<nsINode*>(__prev_parent)->AppendChild(*static_cast<nsINode*>(e), rv);
++
++    while (!__prev_body.empty())  // Revert body children.
++    {
++       RefPtr<nsIContent> node = __prev_body.back();
++       static_cast<nsINode*>(body)->AppendChild(*static_cast<nsINode*>(node.get()), rv);
++       __prev_body.pop_back();
++    }
++
++    // Revert css.
++    body->SetAttribute(css_style, __prev_body_style, err);
++    e->SetAttribute(css_style, __prev_element_style, err);
++
++    // Drop reference.
++    __prev_parent = nullptr;
++  }
+ }
+ 
+-
+-void Embed_FullScreen(Element *e, bool enable)
++static bool fullscreen_enabled = false;
++void Embed_FullScreen_Configure_Content(Element *e)
+ {
+-   ErrorResult err;
+-   nsAutoString token(L"style"); nsAutoString value(L"height: 98vh; width: 98vw; border:0;margin:0;padding:0");
+-   e->SetAttribute(token, value, err);
++   fullscreen_enabled ^= 1;  
+ 
+    Document* doc = e->OwnerDoc();
+-   HTML_Inspect(e, true);
+-
+-   PresShell* presShell = doc->GetPresShell();
+-
+-  // TODO: Restyle with full screen styling - something like this.
+-   //nsPresContext* presContext = presShell->GetPresContext();
++   //nsIDocShell* docShell = doc->GetDocShell();
++
++   HTML_Inspect(e, fullscreen_enabled);
++
++   // TODO: Restyle with full screen styling - something like this.
++   
++   // nsPresContext* presContext = presShell->GetPresContext();
+    //nsCSSFrameConstructor* frameConstructor = presContext->FrameConstructor();
+    //frameConstructor->RecreateFramesForContent(e,nsCSSFrameConstructor::InsertionKind::Sync);
+-
+-   // No idea if necessary.
+-   presShell->FlushPendingNotifications(FlushType::Style);
+-   presShell->FlushPendingNotifications(FlushType::Layout);
+ }
+ #endif
+ 
+@@ -3393,7 +3432,9 @@
+ 
+ #ifdef INF_PATCH
+    if (Gecko_Embed())
+-      Embed_FullScreen(this, true);
++   {
++      Embed_FullScreen_Configure_Content(this);
++   }
+ #endif
+ 
+     OwnerDoc()->AsyncRequestFullscreen(std::move(request));
+diff --git a/dom/base/nsGlobalWindowOuter.cpp b/dom/base/nsGlobalWindowOuter.cpp
+--- a/dom/base/nsGlobalWindowOuter.cpp
++++ b/dom/base/nsGlobalWindowOuter.cpp
+@@ -259,6 +259,8 @@
+ #ifdef INF_PATCH
+ #include "adv_sw_patch_prompt.h"
+ bool __cdecl Gecko_Embed();
++void __cdecl Gecko_Embed_SetFullScreen(void* id, bool full_screen);
++#include "..\..\xpfe\appshell\AppWindow.h"
+ #endif // INF_PATCH
+ 
+ #ifdef ANDROID
+@@ -4605,6 +4607,18 @@
+       // The rest of code for switching fullscreen is in nsGlobalWindowOuter::
+       // FinishFullscreenChange() which will be called after sizemodechange
+       // event is dispatched.
++
++#ifdef INF_PATCH
++      if (Gecko_Embed() && XRE_IsParentProcess()) {
++        nsCOMPtr<nsIDocShellTreeOwner> tree_owner;
++        mDocShell->GetTreeOwner(getter_AddRefs(tree_owner));
++        auto chrome_tree_owner = (nsChromeTreeOwner*)tree_owner.get();
++        auto app_win = chrome_tree_owner->AppWindow();
++        void* instance_ptr = app_win->Embed_GetUserData();
++        Gecko_Embed_SetFullScreen(instance_ptr, aFullscreen);
++      }
++#endif // INF_PATCH: FullScreen
++
+       return NS_OK;
+     }
+   }
+@@ -4628,10 +4642,6 @@
+ }
+ 
+ 
+-#ifdef INF_PATCH
+-void __cdecl Gecko_SetFullScreen(nsIWidget *wid, bool fs);
+-#endif
+-
+ bool nsGlobalWindowOuter::SetWidgetFullscreen(FullscreenReason aReason,
+                                               bool aIsFullscreen,
+                                               nsIWidget* aWidget,
+@@ -4663,15 +4673,8 @@
+           : aWidget->MakeFullScreen(aIsFullscreen, aScreen);
+ 
+ #ifdef INF_PATCH
+-   if (Gecko_Embed())
+-   {
+-      Gecko_SetFullScreen(aWidget, aIsFullscreen);
+-      
+-      // Required bcoz standard fullscreen transition has complex js dependencies.
+-      // Hence we deliver the simple way.
+-
+-      return false; // Skip most fullscreen transition codepaths. Displays regular element.
+-   }
++  if (Gecko_Embed())
++     return false; // Embed full screen transition path.
+ #endif
+ 
+   return NS_SUCCEEDED(rv);
+diff --git a/xpfe/appshell/AppWindow.cpp b/xpfe/appshell/AppWindow.cpp
+--- a/xpfe/appshell/AppWindow.cpp
++++ b/xpfe/appshell/AppWindow.cpp
+@@ -103,10 +103,6 @@
+ 
+ #define SIZE_PERSISTENCE_TIMEOUT 500  // msec
+ 
+-#ifdef INF_PATCH
+-void __cdecl Gecko_SetFullScreen(void *id, bool full_screen);
+-#endif
+-
+ 
+ //*****************************************************************************
+ //***    AppWindow: Object Management
+@@ -2948,11 +2944,6 @@
+   if (mDocShell) {
+     if (nsCOMPtr<nsPIDOMWindowOuter> ourWindow = mDocShell->GetWindow()) {
+       ourWindow->FinishFullscreenChange(aInFullscreen);
+-
+-#ifdef INF_PATCH
+-      void *instance_ptr = GetEmbedUserData();
+-      Gecko_SetFullScreen(instance_ptr, aInFullscreen);
+-#endif
+     }
+   }
+ }
+diff --git a/xpfe/appshell/AppWindow.h b/xpfe/appshell/AppWindow.h
+--- a/xpfe/appshell/AppWindow.h
++++ b/xpfe/appshell/AppWindow.h
+@@ -177,8 +177,8 @@
+   explicit AppWindow(uint32_t aChromeFlags);
+ 
+ #ifdef INF_PATCH
+-  void  SetEmbedUserData(void *value) { m_user = value; }
+-  void *GetEmbedUserData() { return m_user; }
++  void  Embed_SetUserData(void *value) { m_user = value; }
++  void* Embed_GetUserData() { return m_user; }
+   void *m_user;
+ #endif  
+ 
+# HG changeset patch
+# User stevew <steve@advance-software.com>
+# Date 1642515238 0
+#      Tue Jan 18 14:13:58 2022 +0000
+# Node ID 01f7ce5b4def630967dd47115d8a47e661615a60
+# Parent  292b8bf9bbb1170776688d690e0a4f7d736d4b4a
+html inspect element refine.
+
+diff --git a/dom/base/Element.cpp b/dom/base/Element.cpp
+--- a/dom/base/Element.cpp
++++ b/dom/base/Element.cpp
+@@ -191,8 +191,113 @@
+ 
+ #ifdef INF_PATCH
+ bool __cdecl Gecko_Embed();
++static RefPtr<Element> __inspected = nullptr;
++static bool fullscreen_enabled = false;
++
++void HTML_Inspect(RefPtr<Element> e, bool active) {
++  nsAutoScriptBlocker scriptBlocker;
++
++  if (active)
++     __inspected = e;
++  else
++     __inspected = nullptr;
++
++  Document* doc = e->OwnerDoc();
++  HTMLBodyElement* body = doc->GetBodyElement();
++
++  const nsAutoString css_style(L"style");
++
++  ErrorResult err;
++  mozilla::ErrorResult rv;
++
++  static std::list<RefPtr<nsIContent>> __prev_body;
++  static nsAutoString __prev_element_style(L"");
++  static nsAutoString __prev_body_style(L"");
++  static RefPtr<nsINode> __prev_parent = nullptr;
++
++  PresShell* presShell = doc->GetPresShell();
++
++  if (active) {
++    e->GetAttribute(css_style, __prev_element_style);
++    __prev_parent = e->GetParentNode();
++    e->AddRef();
++
++    // Remove previous body elements, keeping a reference so they're not garbage
++    // collected.
++    while (body->HasChildren()) {
++      auto node = body->GetFirstChild();
++      __prev_body.push_back(node);
++      node->AddRef();
++      node->Remove();
++    }
++
++    e->Remove();
++    static_cast<nsINode*>(body)->AppendChild(*static_cast<nsINode*>(e), rv);
++
++    body->GetAttribute(css_style, __prev_body_style);
++    nsAutoString body_style_fs(
++        L"width: vw; vh; border:0;margin:0;padding:0;background-color: "
++        L"rgb(0,0,0);");
++    body->SetAttribute(css_style, body_style_fs, err);
++
++    nsAutoString element_style_fs(
++        L"width: 100%; height: 100%; border:0;margin:0;padding:0");
++    e->SetAttribute(css_style, element_style_fs, err);
++  } else {
++    e->Remove();  // Unpin
++    static_cast<nsINode*>(__prev_parent)
++        ->AppendChild(*static_cast<nsINode*>(e), rv);
++
++    while (!__prev_body.empty())  // Revert body children.
++    {
++      RefPtr<nsIContent> node = *__prev_body.begin();
++      static_cast<nsINode*>(body)->AppendChild(
++          *static_cast<nsINode*>(node.get()), rv);
++      __prev_body.pop_front();
++    }
++
++    // Revert css.
++    body->SetAttribute(css_style, __prev_body_style, err);
++    e->SetAttribute(css_style, __prev_element_style, err);
++
++    // Drop reference.
++    __prev_parent = nullptr;
++  }
++}
++
++
++void __cdecl Gecko_Embed_Inspect_End() {
++
++   if (__inspected)
++   {
++      HTML_Inspect(__inspected, false);
++      fullscreen_enabled = false;
++   }
++}
++
++void Embed_FullScreen_Configure_Content(RefPtr<Element> e) {
++
++  fullscreen_enabled ^= 1;
++  HTML_Inspect(e, fullscreen_enabled);
++
++  Document* doc = e->OwnerDoc();
++  nsIDocShell* docShell = doc->GetDocShell();
++  nsPresContext* presContext = presShell->GetPresContext();
++  
++  // Send one Restore event over the IPC pipe.
++  if (!enable) presContext->SizeModeChanged(nsSizeMode_Restore);
++
++  // ... then select standard mode so restore isn't echoed multiple times.
++  presContext->SizeModeChanged(fullscreen_enabled ? nsSizeMode_Fullscreen : nsSizeMode_Normal);
++
++
++  // TODO: Restyle with full screen styling - something like this.
++  // nsCSSFrameConstructor* frameConstructor = presContext->FrameConstructor();
++  // frameConstructor->RecreateFramesForContent(e,nsCSSFrameConstructor::InsertionKind::Sync);
++}
+ #endif
+ 
++
+ using mozilla::gfx::Matrix4x4;
+ 
+ namespace mozilla::dom {
+@@ -3329,91 +3434,6 @@
+ }
+ 
+ 
+-#ifdef INF_PATCH
+-
+- void HTML_Inspect(Element *e, bool active) 
+-{
+-  nsAutoScriptBlocker scriptBlocker;
+-
+-  Document* doc = e->OwnerDoc();
+-  HTMLBodyElement* body = doc->GetBodyElement();
+-
+-  const nsAutoString css_style(L"style");
+-  
+-  ErrorResult err;
+-  mozilla::ErrorResult rv;
+-
+-  static std::vector<RefPtr<nsIContent>> __prev_body;
+-  static nsAutoString __prev_element_style(L"");
+-  static nsAutoString __prev_body_style(L"");
+-  static RefPtr<nsINode> __prev_parent = nullptr;
+-
+-  PresShell* presShell = doc->GetPresShell();
+-
+-  if (active)
+-  {
+-      e->GetAttribute(css_style, __prev_element_style);
+-     __prev_parent = e->GetParentNode(); e->AddRef();
+-
+-     // Remove previous body elements, keeping a reference so they're not garbage collected.
+-     while (body->HasChildren()) {
+-       auto node = body->GetFirstChild();
+-       __prev_body.push_back(node);
+-       node->AddRef();
+-       node->Remove();
+-     }
+-
+-     e->Remove();
+-     static_cast<nsINode*>(body)->AppendChild(*static_cast<nsINode*>(e), rv);
+-
+-     body->GetAttribute(css_style, __prev_body_style);
+-      nsAutoString body_style_fs(
+-         L"width: vw; vh; border:0;margin:0;padding:0;background-color: rgb(0,0,0);");
+-     body->SetAttribute(css_style, body_style_fs, err);
+-
+-     nsAutoString element_style_fs(L"width: 100%; height: 100%; border:0;margin:0;padding:0");
+-     e->SetAttribute(css_style, element_style_fs, err);
+-  }
+-  else
+-  {
+-    e->Remove(); // Unpin
+-    static_cast<nsINode*>(__prev_parent)->AppendChild(*static_cast<nsINode*>(e), rv);
+-
+-    while (!__prev_body.empty())  // Revert body children.
+-    {
+-       RefPtr<nsIContent> node = __prev_body.back();
+-       static_cast<nsINode*>(body)->AppendChild(*static_cast<nsINode*>(node.get()), rv);
+-       __prev_body.pop_back();
+-    }
+-
+-    // Revert css.
+-    body->SetAttribute(css_style, __prev_body_style, err);
+-    e->SetAttribute(css_style, __prev_element_style, err);
+-
+-    // Drop reference.
+-    __prev_parent = nullptr;
+-  }
+-}
+-
+-static bool fullscreen_enabled = false;
+-void Embed_FullScreen_Configure_Content(Element *e)
+-{
+-   fullscreen_enabled ^= 1;  
+-
+-   Document* doc = e->OwnerDoc();
+-   //nsIDocShell* docShell = doc->GetDocShell();
+-
+-   HTML_Inspect(e, fullscreen_enabled);
+-
+-   // TODO: Restyle with full screen styling - something like this.
+-   
+-   // nsPresContext* presContext = presShell->GetPresContext();
+-   //nsCSSFrameConstructor* frameConstructor = presContext->FrameConstructor();
+-   //frameConstructor->RecreateFramesForContent(e,nsCSSFrameConstructor::InsertionKind::Sync);
+-}
+-#endif
+-
+-
+ already_AddRefed<Promise> Element::RequestFullscreen(CallerType aCallerType,
+                                                      ErrorResult& aRv) {
+   auto request = FullscreenRequest::Create(this, aCallerType, aRv);
+@@ -3432,9 +3452,7 @@
+ 
+ #ifdef INF_PATCH
+    if (Gecko_Embed())
+-   {
+       Embed_FullScreen_Configure_Content(this);
+-   }
+ #endif
+ 
+     OwnerDoc()->AsyncRequestFullscreen(std::move(request));
+diff --git a/dom/ipc/BrowserChild.cpp b/dom/ipc/BrowserChild.cpp
+--- a/dom/ipc/BrowserChild.cpp
++++ b/dom/ipc/BrowserChild.cpp
+@@ -157,6 +157,11 @@
+ #  include "nsIWebBrowserPrint.h"
+ #endif
+ 
++#ifdef INF_PATCH
++bool __cdecl Gecko_Embed();
++void __cdecl Gecko_Embed_Inspect_End();
++#endif
++
+ static mozilla::LazyLogModule sApzChildLog("apz.child");
+ 
+ using namespace mozilla;
+@@ -1307,6 +1312,14 @@
+   if (presContext) {
+     presContext->SizeModeChanged(aSizeMode);
+   }
++
++#ifdef INF_PATCH
++  if (Gecko_Embed()) 
++  {
++    if (aSizeMode == nsSizeMode_Restore) 
++         Gecko_Embed_Inspect_End();
++  }
++#endif
+   return IPC_OK();
+ }
+ 
+diff --git a/widget/nsBaseWidget.cpp b/widget/nsBaseWidget.cpp
+--- a/widget/nsBaseWidget.cpp
++++ b/widget/nsBaseWidget.cpp
+@@ -734,7 +734,9 @@
+ //-------------------------------------------------------------------------
+ void nsBaseWidget::SetSizeMode(nsSizeMode aMode) {
+   MOZ_ASSERT(aMode == nsSizeMode_Normal || aMode == nsSizeMode_Minimized ||
+-             aMode == nsSizeMode_Maximized || aMode == nsSizeMode_Fullscreen);
++             aMode == nsSizeMode_Maximized || aMode == nsSizeMode_Fullscreen
++            // INF_PATCH
++            || aMode == nsSizeMode_Restore);
+   mSizeMode = aMode;
+ }
+ 
+diff --git a/widget/nsIWidgetListener.h b/widget/nsIWidgetListener.h
+--- a/widget/nsIWidgetListener.h
++++ b/widget/nsIWidgetListener.h
+@@ -30,6 +30,8 @@
+   nsSizeMode_Minimized,
+   nsSizeMode_Maximized,
+   nsSizeMode_Fullscreen,
++  // INF_PATCH
++  nsSizeMode_Restore,
+   nsSizeMode_Invalid
+ };
+ 
+# HG changeset patch
+# User stevew <steve@advance-software.com>
+# Date 1642519294 0
+#      Tue Jan 18 15:21:34 2022 +0000
+# Node ID 9052f836bfd92b42f71a31b8124ac31564be08e9
+# Parent  01f7ce5b4def630967dd47115d8a47e661615a60
+.
+
+diff --git a/dom/base/Element.cpp b/dom/base/Element.cpp
+--- a/dom/base/Element.cpp
++++ b/dom/base/Element.cpp
+@@ -280,15 +280,17 @@
+   fullscreen_enabled ^= 1;
+   HTML_Inspect(e, fullscreen_enabled);
+ 
++#if 0
+   Document* doc = e->OwnerDoc();
+-  nsIDocShell* docShell = doc->GetDocShell();
++  PresShell* presShell = doc->GetPresShell();
+   nsPresContext* presContext = presShell->GetPresContext();
+   
+   // Send one Restore event over the IPC pipe.
+-  if (!enable) presContext->SizeModeChanged(nsSizeMode_Restore);
++  if (!fullscreen_enabled) presContext->SizeModeChanged(nsSizeMode_Restore);
+ 
+   // ... then select standard mode so restore isn't echoed multiple times.
+   presContext->SizeModeChanged(fullscreen_enabled ? nsSizeMode_Fullscreen : nsSizeMode_Normal);
++#endif
+ 
+ 
+   // TODO: Restyle with full screen styling - something like this.
+diff --git a/dom/base/nsGlobalWindowOuter.cpp b/dom/base/nsGlobalWindowOuter.cpp
+--- a/dom/base/nsGlobalWindowOuter.cpp
++++ b/dom/base/nsGlobalWindowOuter.cpp
+@@ -4674,7 +4674,7 @@
+ 
+ #ifdef INF_PATCH
+   if (Gecko_Embed())
+-     return false; // Embed full screen transition path.
++     return false; // Embed full screen mode (required).
+ #endif
+ 
+   return NS_SUCCEEDED(rv);
+# HG changeset patch
+# User stevew <steve@advance-software.com>
+# Date 1642531172 0
+#      Tue Jan 18 18:39:32 2022 +0000
+# Node ID af452db6a093ed9e3e4e7c83620af5882593ded4
+# Parent  9052f836bfd92b42f71a31b8124ac31564be08e9
+gecko embed fullscreen implementation complete :)
+
+diff --git a/docshell/base/nsDocShellTreeOwner.h b/docshell/base/nsDocShellTreeOwner.h
+--- a/docshell/base/nsDocShellTreeOwner.h
++++ b/docshell/base/nsDocShellTreeOwner.h
+@@ -81,7 +81,12 @@
+   // nsISupportsWeakReference, then these functions call QueryReferent on
+   // that object.  Otherwise, they return an addrefed pointer.  If the
+   // WebBrowserChrome object doesn't exist, they return nullptr.
++
++// INF_PATCH
++public:
+   already_AddRefed<nsIWebBrowserChrome> GetWebBrowserChrome();
++
++protected:
+   already_AddRefed<nsIEmbeddingSiteWindow> GetOwnerWin();
+   already_AddRefed<nsIInterfaceRequestor> GetOwnerRequestor();
+ 
+diff --git a/dom/base/Document.cpp b/dom/base/Document.cpp
+--- a/dom/base/Document.cpp
++++ b/dom/base/Document.cpp
+@@ -435,6 +435,10 @@
+ mozilla::LazyLogModule gTimeoutDeferralLog("TimeoutDefer");
+ mozilla::LazyLogModule gUseCountersLog("UseCounters");
+ 
++#ifdef INF_PATCH
++bool __cdecl Gecko_Embed();
++#endif
++
+ namespace mozilla {
+ namespace dom {
+ 
+@@ -14442,13 +14446,26 @@
+   // Ensure the frame element is the fullscreen element in this document.
+   // If the frame element is already the fullscreen element in this document,
+   // this has no effect.
+-  auto request = FullscreenRequest::CreateForRemote(aFrameElement);
+-  RequestFullscreen(std::move(request), XRE_IsContentProcess());
++
++#ifdef INF_PATCH
++  if (!Gecko_Embed())
++  {
++      // Standard ff fullscreen path disabled when embedding.
++      auto request = FullscreenRequest::CreateForRemote(aFrameElement);
++      RequestFullscreen(std::move(request), XRE_IsContentProcess());
++  }
++#endif
+ }
+ 
+ void Document::RemoteFrameFullscreenReverted() {
+-  UniquePtr<FullscreenExit> exit = FullscreenExit::CreateForRemote(this);
+-  RestorePreviousFullscreenState(std::move(exit));
++
++#ifdef INF_PATCH
++  if (!Gecko_Embed()) {
++     // Standard ff fullscreen path disabled when embedding.
++     UniquePtr<FullscreenExit> exit = FullscreenExit::CreateForRemote(this);
++     RestorePreviousFullscreenState(std::move(exit));
++  }
++#endif
+ }
+ 
+ static bool HasFullscreenSubDocument(Document& aDoc) {
+diff --git a/dom/base/Element.cpp b/dom/base/Element.cpp
+--- a/dom/base/Element.cpp
++++ b/dom/base/Element.cpp
+@@ -176,6 +176,7 @@
+ #include "nsViewManager.h"
+ #include "nsWindowSizes.h"
+ 
++
+ #ifdef MOZ_XUL
+ #  include "nsXULElement.h"
+ #endif /* MOZ_XUL */
+@@ -190,6 +191,7 @@
+ 
+ 
+ #ifdef INF_PATCH
++#include "nsDocShellTreeOwner.h"
+ bool __cdecl Gecko_Embed();
+ static RefPtr<Element> __inspected = nullptr;
+ static bool fullscreen_enabled = false;
+@@ -277,21 +279,23 @@
+ 
+ void Embed_FullScreen_Configure_Content(RefPtr<Element> e) {
+ 
+-  fullscreen_enabled ^= 1;
+-  HTML_Inspect(e, fullscreen_enabled);
+-
+-#if 0
+-  Document* doc = e->OwnerDoc();
+-  PresShell* presShell = doc->GetPresShell();
+-  nsPresContext* presContext = presShell->GetPresContext();
++   fullscreen_enabled ^= 1;
++   HTML_Inspect(e, fullscreen_enabled);
++
++   Document* doc = e->OwnerDoc();
++   nsIDocShell* doc_shell = doc->GetDocShell();
++
++   nsCOMPtr<nsIDocShellTreeOwner> tree_owner;
++   doc_shell->GetTreeOwner(getter_AddRefs(tree_owner));
++   nsCOMPtr<nsIWebBrowserChrome> wb_chrome = ((nsDocShellTreeOwner*)tree_owner.get())->GetWebBrowserChrome();
++   nsCOMPtr<nsIBrowserChild> browserChild = do_QueryInterface(wb_chrome);
+   
+-  // Send one Restore event over the IPC pipe.
+-  if (!fullscreen_enabled) presContext->SizeModeChanged(nsSizeMode_Restore);
+-
+-  // ... then select standard mode so restore isn't echoed multiple times.
+-  presContext->SizeModeChanged(fullscreen_enabled ? nsSizeMode_Fullscreen : nsSizeMode_Normal);
+-#endif
+-
++   if (browserChild) {
++     // We encode embedding fullscreen transitions
++     // via "invalid" sizing here. 
++     // Bit of a hack. Done this way to avoid having to create a new IPC message flow.
++     browserChild->RemoteSizeShellTo(-1, fullscreen_enabled ? -2 : -1, -1, -1);
++   }
+ 
+   // TODO: Restyle with full screen styling - something like this.
+   // nsCSSFrameConstructor* frameConstructor = presContext->FrameConstructor();
+diff --git a/dom/base/nsGlobalWindowOuter.cpp b/dom/base/nsGlobalWindowOuter.cpp
+--- a/dom/base/nsGlobalWindowOuter.cpp
++++ b/dom/base/nsGlobalWindowOuter.cpp
+@@ -4607,18 +4607,6 @@
+       // The rest of code for switching fullscreen is in nsGlobalWindowOuter::
+       // FinishFullscreenChange() which will be called after sizemodechange
+       // event is dispatched.
+-
+-#ifdef INF_PATCH
+-      if (Gecko_Embed() && XRE_IsParentProcess()) {
+-        nsCOMPtr<nsIDocShellTreeOwner> tree_owner;
+-        mDocShell->GetTreeOwner(getter_AddRefs(tree_owner));
+-        auto chrome_tree_owner = (nsChromeTreeOwner*)tree_owner.get();
+-        auto app_win = chrome_tree_owner->AppWindow();
+-        void* instance_ptr = app_win->Embed_GetUserData();
+-        Gecko_Embed_SetFullScreen(instance_ptr, aFullscreen);
+-      }
+-#endif // INF_PATCH: FullScreen
+-
+       return NS_OK;
+     }
+   }
+diff --git a/dom/ipc/BrowserChild.cpp b/dom/ipc/BrowserChild.cpp
+--- a/dom/ipc/BrowserChild.cpp
++++ b/dom/ipc/BrowserChild.cpp
+@@ -631,16 +631,21 @@
+   nsCOMPtr<nsIBaseWindow> docShellAsWin(do_QueryInterface(ourDocShell));
+   NS_ENSURE_STATE(docShellAsWin);
+ 
+-  int32_t width, height;
+-  docShellAsWin->GetSize(&width, &height);
+-
++  // INF_PATCH
+   uint32_t flags = 0;
+-  if (width == aWidth) {
+-    flags |= nsIEmbeddingSiteWindow::DIM_FLAGS_IGNORE_CX;
+-  }
+-
+-  if (height == aHeight) {
+-    flags |= nsIEmbeddingSiteWindow::DIM_FLAGS_IGNORE_CY;
++
++  if (aShellItemWidth > 0)
++  {
++     int32_t width, height;
++     docShellAsWin->GetSize(&width, &height);
++
++     if (width == aWidth) {
++       flags |= nsIEmbeddingSiteWindow::DIM_FLAGS_IGNORE_CX;
++     }
++
++     if (height == aHeight) {
++       flags |= nsIEmbeddingSiteWindow::DIM_FLAGS_IGNORE_CY;
++     }
+   }
+ 
+   bool sent = SendSizeShellTo(flags, aWidth, aHeight, aShellItemWidth,
+diff --git a/xpfe/appshell/AppWindow.cpp b/xpfe/appshell/AppWindow.cpp
+--- a/xpfe/appshell/AppWindow.cpp
++++ b/xpfe/appshell/AppWindow.cpp
+@@ -103,6 +103,11 @@
+ 
+ #define SIZE_PERSISTENCE_TIMEOUT 500  // msec
+ 
++#ifdef INF_PATCH
++bool __cdecl Gecko_Embed();
++void __cdecl Gecko_Embed_SetFullScreen(void* id, bool full_screen);
++#endif
++
+ 
+ //*****************************************************************************
+ //***    AppWindow: Object Management
+@@ -2718,10 +2723,30 @@
+   return NS_OK;
+ }
+ 
+-void AppWindow::SizeShellToWithLimit(int32_t aDesiredWidth,
++
++ void AppWindow::SizeShellToWithLimit(int32_t aDesiredWidth,
+                                      int32_t aDesiredHeight,
+                                      int32_t shellItemWidth,
+                                      int32_t shellItemHeight) {
++
++#ifdef INF_PATCH
++   if (Gecko_Embed())
++   {
++      // Bit of a hack.
++      // Specially encoded invalid data means request to exit full-screen exclusive mode.
++      if ( (aDesiredWidth == -1)  && (shellItemWidth == -1) && (shellItemHeight == -1) )
++      {
++          // Command in aDesiredHeight : -1: revert, -2: fullscreen
++          if ((aDesiredHeight == -1) || (aDesiredHeight == -2))
++          {
++             bool request_fs = (aDesiredHeight == -2);
++             Gecko_Embed_SetFullScreen(Embed_GetUserData(), request_fs);
++             return;
++          }
++      }
++   }  
++#endif
++
+   int32_t widthDelta = aDesiredWidth - shellItemWidth;
+   int32_t heightDelta = aDesiredHeight - shellItemHeight;
+ 
+# HG changeset patch
+# User stevew <steve@advance-software.com>
+# Date 1642605805 0
+#      Wed Jan 19 15:23:25 2022 +0000
+# Node ID 3d426fb892fd845219b03bd42b027825d95bb115
+# Parent  af452db6a093ed9e3e4e7c83620af5882593ded4
+.
+
+diff --git a/dom/base/Element.cpp b/dom/base/Element.cpp
+--- a/dom/base/Element.cpp
++++ b/dom/base/Element.cpp
+@@ -224,9 +224,9 @@
+     __prev_parent = e->GetParentNode();
+     e->AddRef();
+ 
+-    // Remove previous body elements, keeping a reference so they're not garbage
+-    // collected.
+-    while (body->HasChildren()) {
++    // Remove previous body elements, keeping a reference so they're not garbage collected.
++    while (body->HasChildren()) 
++    {
+       auto node = body->GetFirstChild();
+       __prev_body.push_back(node);
+       node->AddRef();
+@@ -237,24 +237,21 @@
+     static_cast<nsINode*>(body)->AppendChild(*static_cast<nsINode*>(e), rv);
+ 
+     body->GetAttribute(css_style, __prev_body_style);
+-    nsAutoString body_style_fs(
+-        L"width: vw; vh; border:0;margin:0;padding:0;background-color: "
+-        L"rgb(0,0,0);");
++    nsAutoString body_style_fs(L"width:vw;height:vh;border:0;margin:0;padding:0;overflow:hidden;background-color:rgb(0,0,0)");
+     body->SetAttribute(css_style, body_style_fs, err);
+ 
+-    nsAutoString element_style_fs(
+-        L"width: 100%; height: 100%; border:0;margin:0;padding:0");
++    nsAutoString element_style_fs(L"width:100%;height:100%;border:0;margin:0;padding:0;overflow:hidden;");
+     e->SetAttribute(css_style, element_style_fs, err);
+-  } else {
+-    e->Remove();  // Unpin
+-    static_cast<nsINode*>(__prev_parent)
+-        ->AppendChild(*static_cast<nsINode*>(e), rv);
++  }
++  else  
++  {
++    e->Remove();  // Unpin & reapply to usual document location.
++    __prev_parent->AppendChild(*static_cast<nsINode*>(e), rv);
+ 
+     while (!__prev_body.empty())  // Revert body children.
+     {
+       RefPtr<nsIContent> node = *__prev_body.begin();
+-      static_cast<nsINode*>(body)->AppendChild(
+-          *static_cast<nsINode*>(node.get()), rv);
++      static_cast<nsINode*>(body)->AppendChild(*static_cast<nsINode*>(node.get()), rv);
+       __prev_body.pop_front();
+     }
+ 
+@@ -268,8 +265,8 @@
+ }
+ 
+ 
+-void __cdecl Gecko_Embed_Inspect_End() {
+-
++void __cdecl Gecko_Embed_Inspect_End() 
++{
+    if (__inspected)
+    {
+       HTML_Inspect(__inspected, false);
+@@ -277,8 +274,9 @@
+    }
+ }
+ 
+-void Embed_FullScreen_Configure_Content(RefPtr<Element> e) {
+-
++
++void Embed_FullScreen_Configure_Content(RefPtr<Element> e) 
++{
+    fullscreen_enabled ^= 1;
+    HTML_Inspect(e, fullscreen_enabled);
+ 
+@@ -290,10 +288,11 @@
+    nsCOMPtr<nsIWebBrowserChrome> wb_chrome = ((nsDocShellTreeOwner*)tree_owner.get())->GetWebBrowserChrome();
+    nsCOMPtr<nsIBrowserChild> browserChild = do_QueryInterface(wb_chrome);
+   
+-   if (browserChild) {
+-     // We encode embedding fullscreen transitions
+-     // via "invalid" sizing here. 
+-     // Bit of a hack. Done this way to avoid having to create a new IPC message flow.
++   if (browserChild) 
++   {
++     // Gecko_Embed: FullScreen IPC transitions.
++     // HACK: Implemented "invalid" sizing, filtered out at the BrowserParent receiver. 
++     // Done this way to avoid having to create a new Gecko IPC message.
+      browserChild->RemoteSizeShellTo(-1, fullscreen_enabled ? -2 : -1, -1, -1);
+    }
+ 
