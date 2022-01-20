@@ -5,11 +5,11 @@
 Building mozilla/gecko <><> infinity app (modified firefox).
 
 
-1. Clone version of mozilla we currently target.
+1. Clone version of mozilla targeted by this patch :
 
-            Version : https://hg.mozilla.org/mozilla-unified/rev/FIREFOX_91_3_0esr_RELEASE
+            Version : https://hg.mozilla.org/mozilla-unified/rev/FIREFOX_91_4_0esr_RELEASE
 
-            Clone : hg clone https://hg.mozilla.org/mozilla-unified -r 8802d620459d50ea648821a15497d06efd15732b mozilla
+            Clone : hg clone https://hg.mozilla.org/mozilla-unified -r 3359a85a2277bbcbcc2b5ebcc425922a23d07f34 mozilla
 
 
 2. Clone this repo & place infinity at same level in your dev hierarchy as the mozilla root delivered by above.
@@ -27,11 +27,7 @@ Building mozilla/gecko <><> infinity app (modified firefox).
 
             e.g. C:\Program Files\Infinity\programs\mozilla
 
-6. Turn on autoplay videos in firefox.js to verify video plays before videocontrols are fixed.
-
-             pref("media.autoplay.default", 0);
-
-7. Run infinity with test content to test app & any modifications.
+6. Run infinity with webpage content to test <><> infinity mozilla app & any modifications.
 
 
 
