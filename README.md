@@ -27,7 +27,7 @@ Building mozilla/gecko <><> infinity app (modified firefox).
 
             e.g. C:\Program Files\Infinity\programs\mozilla
 
-6. Run infinity with webpage content to test <><> infinity mozilla app & any modifications.
+6. Run infinity with webpage content to test <><> infinity mozilla app & any modifications. There's a 'test' directory in this repro which can be used as test content. 
 
 
 
