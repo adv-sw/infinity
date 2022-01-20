@@ -6,7 +6,7 @@ File        : inf_interprocess_msg.h
 
 Description : App<->Infinity inter-process communictions definition.
 
-License : Copyright (c) 2002 - 2021, Advance Software Limited.
+License : Copyright (c) 2002 - 2022, Advance Software Limited.
 
 Redistribution and use in source and binary forms, with or without modification are permitted provided that the following conditions are met:
 
@@ -24,12 +24,10 @@ LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF
 ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ */
 
 
-
-
 #ifndef INF_INTERPROCESS_MSG_H
 #define INF_INTERPROCESS_MSG_H 1
 
-// Inter-process communications.
+// Inter-Process Communications (IPC)
 
 // Kernel -> App
 // TODO: Ensure these stay in sync with Parent_Message_ID
@@ -50,10 +48,12 @@ LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF
 #define INFINITY_APP_COOKIE_QUERY    15
 #define INFINITY_APP_COOKIE_ASSIGN   16
 #define INFINITY_APP_THEME_CHANGE    17
-#define INFINITY_AUDIO_STATUS        18
-#define INFINITY_AUDIO_REQUEST       19
-#define INFINITY_TELEMETRY           20
-#define INFINITY_APP_TERMINATE       21
+#define INFINITY_APP_TERMINATE       18
+#define INFINITY_APP_EXCLUSIVE       19
+#define INFINITY_APP_AUDIO_STATUS    20
+#define INFINITY_APP_AUDIO_REQUEST   21
+#define INFINITY_APP_TELEMETRY       22
+
 
 // App -> Kernel
 #define INFINITY_DELIVER_FRAME     0
@@ -66,11 +66,12 @@ LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF
 #define INFINITY_APP_COOKIE_VALUE  7
 #define INFINITY_APP_COOKIE_UPDATE 8
 #define INFINITY_APP_EXIT          9
-#define INFINITY_APP_CONNECTED    10
-#define INFINITY_AUDIO_TIME       11
-#define INFINITY_FORMAT_CHANGED   12
-#define INFINITY_LOG              13
-#define INFINITY_PROGRESS         14
+#define INFINITY_APP_CONNECTED     10
+#define INFINITY_AUDIO_TIME        11
+#define INFINITY_FORMAT_CHANGED    12
+#define INFINITY_LOG               13
+#define INFINITY_PROGRESS          14
+#define INFINITY_REQUEST_EXCLUSIVE 15
 
 
 const char *Parent_Message_ID(uint32_t msg_id);

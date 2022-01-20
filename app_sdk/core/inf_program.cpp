@@ -6,7 +6,7 @@ File        : inf_program.cpp
 
 Description : Program base class implementation.
 
-License : Copyright (c) 2002 - 2021, Advance Software Limited.
+License : Copyright (c) 2002 - 2022, Advance Software Limited.
 
 Redistribution and use in source and binary forms, with or without modification are permitted provided that the following conditions are met:
 
@@ -39,7 +39,6 @@ LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF
 
 // Ensure no infinity kernel side dependencies.
 // TODO: Clean up headers so not required.
-#define INF_STRING_H 
 #define INF_UTIL_H 
 
 #include "inf_interprocess_msg.h"
@@ -57,7 +56,8 @@ LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF
 
 //#include "..\base\inf_util.h"
 
-#define INF_VERBOSE 0
+#define INF_VERBOSE   0
+#define INF_LOG_COMMS 1
 
 extern const char* __program_id;
 
@@ -154,8 +154,8 @@ void _cdecl Infinity_Log(uint32_t log_type, uint32_t log_id, const char *format,
 
 // ---------------------------- Cmd_Target- ----------------------------[BEGIN]
 
-std::map<size_t, Infinity::App*> __lookup;
-typedef std::pair<size_t, Infinity::App*> PT_Entry;
+std::map<Cmd_Target, Infinity::App*> __lookup;
+typedef std::pair<size_t, Infinity::App*> App_Instance;
 
 extern "C" Infinity::App * __cdecl App_CreateInstance();
 
@@ -172,8 +172,9 @@ Infinity::App* __cdecl Infinity::Find(Cmd_Target t, Infinity::uint32 op)
       if (new_entry)
       {
          app = App_CreateInstance();
+         app->m_instance_id = t;
 
-         __lookup.insert(PT_Entry(t, app));
+         __lookup.insert(App_Instance(t, app));
 
          if (!app->Initialize())
          {
@@ -216,8 +217,15 @@ bool Parent_Ready()
 
 bool Msg_Parent(Cmd_ID cmd_id, Cmd_Target t, void* data, size_t len, bool write_len)
 {
+   // TODO: Pipe writes complete asynchronously, so release of payloads needs to be when we know sent.
+   // How do we do this ? ** IMPORTANT ** - will lead to instablilities if not done properly.
+
    if (Parent_Ready())
    {
+#if INF_LOG_COMMS
+      Infinity_Log(INF_LOG_FILE, 0, "cmd_id: %d  payload: %d", cmd_id, len);
+#endif
+
       __program.m_pipe->Message_Send(cmd_id, t, data, len, write_len);
       return true;
    }
@@ -242,6 +250,7 @@ extern const char* __program_id;
 void App_OnVisible(Cmd_Target t, unsigned char new_val);
 void App_Open(Cmd_Target t, wchar_t* url);
 void App_Pause(Cmd_Target t);
+void App_Exclusive_Requested(Cmd_Target t, bool enable);
 void App_Redraw(Cmd_Target t);
 void App_Play(Cmd_Target t);
 
@@ -400,11 +409,6 @@ void Overlay(uint32 surface_handle, RECT& r, Cmd_Target t)
    else if (msg->id == INF_MESSAGE_PRINT)
       OnPrint();
 
-   else if (msg->id == INF_MESSAGE_EXCLUSIVE_REQUEST)
-   {
-      //bool enable = !!msg->data;
-      //SetExclusiveDisplay(enable);
-   }
    else if (msg->id == INF_MESSAGE_SET_ASPECT)
    {
       SetAspectRatio(*(float*)&msg->data);
@@ -427,14 +431,14 @@ static bool OnParentEvent(const Cmd_Header& cmd)
 #if INF_VERBOSE
 
    // Filtered out coz loads of these, which get in the way of spotting what's going on.
-   bool filter = (cmd.id == INFINITY_TELEMETRY) || (cmd.id == INFINITY_APP_CURSOR_POSITION);
+   bool filter = (cmd.id == INFINITY_APP_TELEMETRY) || (cmd.id == INFINITY_APP_CURSOR_POSITION);
 
    if (!filter)
       Infinity_Log(INF_LOG_FILE, INF_INFO, "OnParentEvent: %s", Parent_Message_ID(cmd.id));
 
 #endif
 
-   if (cmd.id == INFINITY_TELEMETRY)
+   if (cmd.id == INFINITY_APP_TELEMETRY)
    {
       Msg_Telemetry msg_data;
       __program.m_pipe->Read(&msg_data, sizeof(msg_data));
@@ -453,14 +457,14 @@ static bool OnParentEvent(const Cmd_Header& cmd)
 
       return true;
    }
-   else if (cmd.id == INFINITY_AUDIO_REQUEST)
+   else if (cmd.id == INFINITY_APP_AUDIO_REQUEST)
    {
       uint8_t value;
       __program.m_pipe->Read(&value, sizeof(value));
       App_Audio_Request(cmd.target, value);
       return true;
    }
-   else if (cmd.id == INFINITY_AUDIO_STATUS)
+   else if (cmd.id == INFINITY_APP_AUDIO_STATUS)
    {
       uint8_t value;
       __program.m_pipe->Read(&value, sizeof(value));
@@ -573,6 +577,12 @@ static bool OnParentEvent(const Cmd_Header& cmd)
 
       return true;
    }
+   else if (cmd.id == INFINITY_APP_EXCLUSIVE)
+   {
+      uint8 enable;
+      __program.m_pipe->Read(&enable, sizeof(enable));
+      App_Exclusive_Requested(cmd.target, enable);
+   }
    else if (cmd.id == INFINITY_APP_PAUSE)
    {
       App_Pause(cmd.target);
@@ -616,7 +626,6 @@ static bool OnParentEvent(const Cmd_Header& cmd)
    {
       Button_State value;
       __program.m_pipe->Read(&value, sizeof(value));
-
       App_SetButtonState(cmd.target, value);
       return true;
    }
@@ -649,7 +658,23 @@ static bool OnParentEvent(const Cmd_Header& cmd)
 }
 
 
-void Program_Complete()
+void _cdecl Program_Terminate()
+{
+   // Finally zap pipe. 
+   ::SwitchToThread();
+
+   // Communications channels are now closed - parent will close the native pipe once it receives the ack above.
+   // Everything we send thru the pipe must have completed by now or who knows what will happen.
+   // TODO: Ensure flushed.
+   if (__program.m_pipe)
+   {
+      delete __program.m_pipe;
+      __program.m_pipe = nullptr;
+   }
+}
+
+
+void __cdecl Program_Complete()
 {
    Infinity_Log(INF_LOG_DEFAULT, INF_INFO, "App_Exit[1]");
 
@@ -658,15 +683,11 @@ void Program_Complete()
       Msg_Parent(INFINITY_APP_EXIT, 0, 0, 0);
    }
 
-   // Zap pipe. Communications channels are now closed - parent will close the naive pipe once it receives the ack above.
-   if (__program.m_pipe)
-   {
-      delete __program.m_pipe;
-      __program.m_pipe = nullptr;
-   }
-
-   Infinity_Log(INF_LOG_DEFAULT, INF_INFO, "App_Exit[2]");
+   // TODO: Ensure Program_Terminate only called once above pipe write has completed.
 }
+
+
+
 
 const char* INF_MAGIC = "-infinity";
 

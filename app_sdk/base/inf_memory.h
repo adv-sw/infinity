@@ -6,7 +6,7 @@ File        : inf_memory.h
 
 Description : Memory allocation.
 
-License : Copyright (c) 2002 - 2021, Advance Software Limited.
+License : Copyright (c) 2002 - 2022, Advance Software Limited.
 
 Redistribution and use in source and binary forms, with or without modification are permitted provided that the following conditions are met:
 
@@ -39,7 +39,9 @@ LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF
 #if defined INF_SHARED_API_EXPORTS || defined KERNEL_EXPORTS
 #include "inf_call.h"
 #else
+#ifndef INF_SHARED_API
 #define INF_SHARED_API
+#endif
 #endif
 
 inline void * Global_Alloc(size_t nbytes)

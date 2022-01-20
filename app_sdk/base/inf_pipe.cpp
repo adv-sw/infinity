@@ -6,7 +6,7 @@ File        : inf_pipe.cpp
 
 Description : IPC communications pipe.
 
-License : Copyright (c) 2002 - 2021, Advance Software Limited.
+License : Copyright (c) 2002 - 2022, Advance Software Limited.
 
 Redistribution and use in source and binary forms, with or without modification are permitted provided that the following conditions are met:
 
@@ -24,9 +24,10 @@ LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF
 ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ */
 
 
-
 #ifdef _MSC_VER
+#ifndef _CRT_SECURE_NO_WARNINGS
 #define _CRT_SECURE_NO_WARNINGS
+#endif
 #endif
 
 
@@ -450,6 +451,11 @@ bool Pipe::Write(const void *buffer, size_t len)
             // For now, we busy wait for the operation to complete.
             ::WaitForSingleObject(m_overlapped.hEvent, INFINITE);
 
+            // BUG: ^Stalls above when pipe is full. 
+            // TODO: Wait a while, then timeout, logging failure bcoz pipe full.
+            // Reason bcoz one end not pulling sufficient messages out or other is flooding.
+            
+
             // [OPT] Revisit for asynchronous completion if it ever seems worth the effort.
             ::GetOverlappedResult(handle, &m_overlapped, &bytes_written, TRUE);
          }
@@ -639,4 +645,39 @@ size_t Strings_Serialize(uint8 *&dest, const char **str, uint32 num_strings, siz
    }
 
    return str_len;
+}
+
+
+// TODO: Ensure these stay in sync with their definitions in inf_interprocess_msg.h
+const char* Parent_Message_ID(uint32_t msg_id)
+{
+   static const char* ids[] = {
+   "null",
+   "INFINITY_APP_CURSOR_POSITION",
+   "INFINITY_APP_PLAY",
+   "INFINITY_APP_PAUSE",
+   "INFINITY_APP_VOLUME",
+   "INFINITY_APP_VISIBLE",
+   "INFINITY_APP_OPEN",
+   "INFINITY_APP_BUTTON_STATE",
+   "INFINITY_APP_WHEEL_STATE",
+   "INFINITY_APP_EXPIRE_INSTANCE",
+   "INFINITY_APP_SYSTEM_MSG",
+   "INFINITY_APP_FOCUS",
+   "INFINITY_APP_CURSOR",
+   "INFINITY_APP_DIALOG_COMPLETE",
+   "INFINITY_APP_REDRAW",
+   "INFINITY_APP_COOKIE_QUERY",
+   "INFINITY_APP_COOKIE_ASSIGN",
+   "INFINITY_APP_THEME_CHANGE",
+   "INFINITY_AUDIO_STATUS",
+   "INFINITY_AUDIO_REQUEST",
+   "INFINITY_TELEMETRY",
+   "INFINITY_APP_TERMINATE"
+   };
+
+   if (msg_id > INFINITY_APP_TERMINATE)
+      return "?";
+   else
+      return ids[msg_id];
 }

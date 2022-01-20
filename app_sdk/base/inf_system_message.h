@@ -6,7 +6,7 @@ File        : inf_system_message.h
 
 Description : System message definition.
 
-License : Copyright (c) 2002 - 2021, Advance Software Limited.
+License : Copyright (c) 2002 - 2022, Advance Software Limited.
 
 Redistribution and use in source and binary forms, with or without modification are permitted provided that the following conditions are met:
 
@@ -59,11 +59,11 @@ uint32_t KeyState(size_t key);
 
 
 
-
-#define KEY_UP    VK_UP
-#define KEY_DOWN  VK_DOWN
-#define KEY_LEFT  VK_LEFT
-#define KEY_RIGHT VK_RIGHT
+// INF prefix to avoid clashes with other SDKS.
+#define INF_KEY_UP    VK_UP
+#define INF_KEY_DOWN  VK_DOWN
+#define INF_KEY_LEFT  VK_LEFT
+#define INF_KEY_RIGHT VK_RIGHT
 
 
 
@@ -159,10 +159,11 @@ uint32_t KeyState(size_t key);
 #define KEY_KPADD 0x56
 #define KEY_KPSUB 0x52
 
-#define KEY_UP    XK_Up
-#define KEY_DOWN  XK_Down
-#define KEY_LEFT  XK_Left
-#define KEY_RIGHT XK_Right
+// INF prefix to avoid clashes with other SDKS.
+#define INF_KEY_UP    XK_Up
+#define INF_KEY_DOWN  XK_Down
+#define INF_KEY_LEFT  XK_Left
+#define INF_KEY_RIGHT XK_Right
 
 #define KEY_TAB  XK_Tab
 

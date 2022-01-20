@@ -6,7 +6,7 @@ File        : diagnostics.cpp
 
 Description : Diagnostics implementation.
 
-License : Copyright (c) 2021, Advance Software Limited.
+License : Copyright (c) 2022, Advance Software Limited.
 
 Redistribution and use in source and binary forms, with or without modification are permitted provided that the following conditions are met:
 

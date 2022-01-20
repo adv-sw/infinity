@@ -6,7 +6,7 @@ File        : inf_app.cpp
 
 Description : App base class implementation.
 
-License : Copyright (c) 2021, Advance Software Limited.
+License : Copyright (c) 2022, Advance Software Limited.
 
 Redistribution and use in source and binary forms, with or without modification are permitted provided that the following conditions are met:
 
@@ -23,11 +23,10 @@ LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF
 
 ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ */
 
+//"..\base\inf_system_message.h"
 
-#include "..\base\inf_system_message.h"
 #include "inf_app.h"
-
-#define INF_VERBOSE 1
+#include "inf_interprocess_msg.h"
 
 using namespace Infinity;
 
@@ -71,55 +70,19 @@ App::App()
 
    m_cursor_over = false;
 
-   m_parent_msg_queue = nullptr;
-
    m_device_update_in_process = false;
 }
 
 
 App::~App()
 {
-   Delete(m_parent_msg_queue);
-}
-
-
-
-void App::MessageParent(Message *msg)
-{
-   if (!m_parent_msg_queue)  // TODO: put this queue in the parent.
-      m_parent_msg_queue = Message_Queue_Create();
-
-   m_parent_msg_queue->Lock();
-   m_parent_msg_queue->Push(nullptr, msg); // TODO: allow owner to be specified when we batch process
-   m_parent_msg_queue->Unlock();
-
-}
-
-
-Message *App::PopOutgoingMessage()
-{
-   Message *msg;
-
-   if (m_parent_msg_queue)
-   {
-      m_parent_msg_queue->Lock();
-      msg = m_parent_msg_queue->Pop();
-      m_parent_msg_queue->Unlock();
-   }
-   else
-   {
-       msg = nullptr;
-   }
- 
-   return msg;
 }
 
 
 void App::Exclusive_Request(bool enable)
 {
-   Infinity::Message *msg = Infinity::CreateMessage(INF_MESSAGE_EXCLUSIVE_REQUEST);
-   msg->data = (uint8*) enable;
-   MessageParent(msg);
+   uint8 value = (uint8) enable;
+   Msg_Parent(INFINITY_REQUEST_EXCLUSIVE, m_instance_id, &value, 1, false);
 }
 
 
@@ -132,6 +95,8 @@ void App::SetNativeTarget(void *target)
 
 bool App::ProcessSystemMessage(uint32 msg_id, size_t wparam, size_t lparam)
 {
+/*
+
    if (msg_id == WM_KEYDOWN)
    {
       auto key = wparam;
@@ -174,6 +139,8 @@ bool App::ProcessSystemMessage(uint32 msg_id, size_t wparam, size_t lparam)
 //#endif
 
    }
+*/
+
 
    return false; // Not processed.
 }

@@ -6,7 +6,7 @@ File        : inf_app.h
 
 Description : App base class implementation.
 
-License : Copyright (c) 2002 - 2021, Advance Software Limited.
+License : Copyright (c) 2002 - 2022, Advance Software Limited.
 
 Redistribution and use in source and binary forms, with or without modification are permitted provided that the following conditions are met:
 
@@ -28,9 +28,8 @@ LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF
 #define INF_APP_H
 
 #include "inf_app_diagnostics.h"
-
 #include "..\base\inf_pipe.h"
-#include "..\base\inf_message.h"
+#include "..\base\inf_math.h"
 
 #include <string>
 
@@ -71,10 +70,10 @@ public:
 
    // Exclusive display toggling.
    void INF_APP_API Exclusive_Request(bool enable);
+   virtual void Exclusive_Requested(bool enable) {}
 
-   virtual uint32 Async_Update(uint32 flags) { return 0; }  // Called from plugin thread.
-   virtual uint32 Sync_Update() { return 0; }  // Called from main thread after scene render.
-
+   virtual uint32 Update(uint32 flags) { return 0; } 
+   
    virtual void OnCompact(uint32 flags) {}
    virtual void Alternative_Cue() {}
 
@@ -102,7 +101,6 @@ public:
    virtual void Reload() {}
    virtual void OnPrint() {}
    virtual void OnPlay(bool play) {}
-   virtual void OnClipboardCommand(Clipboard_Command cmd) {}
 
    void GetFilename(std::string& f) { f = m_filename; }
    void SetFilename(const std::string& f) { m_filename = f; }
@@ -117,7 +115,6 @@ public:
    bool m_is_compact;
    bool m_terminated;
    bool m_cursor_over;
-
    bool m_ignore_input;
 
    // Display
@@ -146,11 +143,7 @@ public:
    // Used to decide when to update dynamic surfaces.
    size_t m_last_update_frame_stamp;
 
-   void INF_APP_API MessageParent(Message* msg);
-   Message* INF_APP_API PopOutgoingMessage();
-
-   Message_Queue* m_parent_msg_queue;
-
+   Cmd_Target m_instance_id;
 };
 
 
