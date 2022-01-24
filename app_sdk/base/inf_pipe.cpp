@@ -41,7 +41,7 @@ LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF
 
 using namespace Infinity;
 
-const size_t pipe_buffer_size = 65536;
+const size_t pipe_buffer_size = 0xffff;
 
 // IMPORTANT: Message mode is essential to ensure stability. Don't use byte mode as not clear how to predictably flush.
 const uint32_t  INF_PIPE_READ_MODE = PIPE_READMODE_MESSAGE;
@@ -458,6 +458,10 @@ bool Pipe::Write(const void *buffer, size_t len)
 
             // [OPT] Revisit for asynchronous completion if it ever seems worth the effort.
             ::GetOverlappedResult(handle, &m_overlapped, &bytes_written, TRUE);
+
+             ok = true; // Not an error.
+             ::SwitchToThread(); // LOAD_BALANCE - we're congested. attempt to unblock.
+             // TODO: Can lock up. Reject after n attempts - must resend.
          }
          else
          {

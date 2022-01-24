@@ -6,7 +6,7 @@ File        : inf_bootstrap.h
 
 Description : Binds Program to invoker via C interface.
 
-License : Copyright (c) 2002 - 2021, Advance Software Limited.
+License : Copyright (c) 2002 - 2022, Advance Software Limited.
 
 Redistribution and use in source and binary forms, with or without modification are permitted provided that the following conditions are met:
 

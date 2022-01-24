@@ -1,5 +1,5 @@
 # infinity
-&lt;>&lt;> infinity 3d web tech public interfaces &amp; examples.
+&lt;>&lt;> Infinity 3D Web Technology : Application Interface &amp; Example : Mozilla/Gecko
 
 Platform Support : Windows 10 & above only at this time.
 
@@ -32,3 +32,4 @@ Building mozilla/gecko <><> infinity app (modified firefox).
 
 
 
+Known Issues : YouTube full-screen mode not working, perhaps some others. <br/>
