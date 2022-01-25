@@ -1,72 +1,297 @@
 # HG changeset patch
 # User stevew <steve@advance-software.com>
-# Date 1643047740 0
-#      Mon Jan 24 18:09:00 2022 +0000
-# Node ID a5e8a9d4c57d096d3003001c628e59886e4aa241
-# Parent  9b4508502e4d795ebf1b498443935687c1fd2ad9
-fixes youtube full screen without regressing standard videocontrols.
+# Date 1643137441 0
+#      Tue Jan 25 19:04:01 2022 +0000
+# Node ID 717888d74805621b2692925bc489b055b4f9b38f
+# Parent  a5e8a9d4c57d096d3003001c628e59886e4aa241
+added IPC mutex to prevent flicker when consuming shared surface.
 
-diff --git a/browser/actors/DOMFullscreenParent.jsm b/browser/actors/DOMFullscreenParent.jsm
---- a/browser/actors/DOMFullscreenParent.jsm
-+++ b/browser/actors/DOMFullscreenParent.jsm
-@@ -97,7 +97,8 @@
-       case "DOMFullscreen:Painted": {
-         Services.obs.notifyObservers(window, "fullscreen-painted");
-         this.sendAsyncMessage("DOMFullscreen:Painted", {});
--        TelemetryStopwatch.finish("FULLSCREEN_CHANGE_MS");
-+	    // INF_PATCH: Doesn't resolve properly, Gecko_Embed path, so disable for now.
-+        //TelemetryStopwatch.finish("FULLSCREEN_CHANGE_MS");
-         break;
-       }
-     }
-@@ -127,13 +128,17 @@
-           window.gXPInstallObserver.removeAllNotifications(browser);
-         }
+diff --git a/gfx/layers/d3d11/CompositorD3D11.cpp b/gfx/layers/d3d11/CompositorD3D11.cpp
+--- a/gfx/layers/d3d11/CompositorD3D11.cpp
++++ b/gfx/layers/d3d11/CompositorD3D11.cpp
+@@ -47,7 +47,24 @@
+ void _cdecl Infinity_Log(size_t id, const char *format, ...);
  
--        TelemetryStopwatch.start("FULLSCREEN_CHANGE_MS");
-+		// INF_PATCH: Doesn't resolve properly, Gecko_Embed path, so disable for now.
-+        //TelemetryStopwatch.start("FULLSCREEN_CHANGE_MS");
-+		
-         window.FullScreen.enterDomFullscreen(browser, this);
-         this.updateFullscreenWindowReference(window);
-         break;
-       }
-       case "MozDOMFullscreen:Exited": {
--        TelemetryStopwatch.start("FULLSCREEN_CHANGE_MS");
+ #include "../../../widget/windows/CompositorWidgetParent.h"
+-const UINT64 __shared_surface_access_key = 1;
 +
-+		// INF_PATCH: Doesn't resolve properly, Gecko_Embed path, so disable for now.
-+        //TelemetryStopwatch.start("FULLSCREEN_CHANGE_MS");
++// We use a Windows named mutex directly as we need access from multiple processes. 
++// TODO: Figure out equivalent other platforms for WebRender port.
++static bool Mutex_Lock(HANDLE mutex, uint32_t wait_ms)
++{
++   if (mutex)
++   {
++      auto wait_result = ::WaitForSingleObject(mutex, wait_ms);
++
++      if (wait_result == WAIT_OBJECT_0)
++         return true;
++
++      if (wait_result == WAIT_ABANDONED)
++         return false;
++   }
++
++   return true; // No mutex
++}
  
-         // Make sure that the actor has not been destroyed before
-         // accessing its browsing context. Otherwise, a error may
-diff --git a/dom/base/Document.cpp b/dom/base/Document.cpp
---- a/dom/base/Document.cpp
-+++ b/dom/base/Document.cpp
-@@ -14823,21 +14823,12 @@
-     DispatchFullscreenNewOriginEvent(this);
+ #endif // INF_PATCH
+ 
+@@ -1254,11 +1271,9 @@
+   mContext->RSSetState(mAttachments->mRasterizerState);
+ 
+ #ifdef INF_PATCH
++  // Grab the shared resource mutex so we can render to the surface.
+    if (m_producer_mutex)
+-   {
+-      // Grab the shared resource mutex so we can render to the surface.
+-      HRESULT hr = m_producer_mutex->AcquireSync(__shared_surface_access_key, INFINITE);
+-   }
++      Mutex_Lock(m_producer_mutex, INFINITE);
+ #endif // INF_PATCH
+ 
+   SetRenderTarget(mDefaultRT);
+@@ -1358,7 +1373,7 @@
+    // We're done drawing, so release the mutex.
+    if (m_producer_mutex)
+    {
+-      HRESULT hr = m_producer_mutex->ReleaseSync(__shared_surface_access_key);
++       ::ReleaseMutex(m_producer_mutex);
+ 
+       // Inform parent an update has occured.
+       // This patch uses a null parent parameter to indicate  we're sending a shared surface handle not a window handle.
+@@ -1623,6 +1638,99 @@
+   return !mVerifyBuffersFailed;
+ }
+ 
++
++#ifdef INF_PATCH
++ID3D11Texture2D *CompositorD3D11::Embed_Update_Render_Target()
++{
++   auto dest = (ID3D11Texture2D*) m_status.m_native_destination;
++
++   // Allocate as required ...
++   if (!dest || m_dimensions_changed)
++   {
++      m_status.m_native_destination = nullptr;
++      m_status.m_shared_surface_handle = nullptr;
++
++      if (dest)
++      {
++         dest->Release();
++         dest = nullptr;
++      }
++
++      if (m_producer_mutex) 
++      {
++           ::CloseHandle(m_producer_mutex);
++           m_producer_mutex = nullptr;
++      }
++
++      if (!dest)
++      {
++         m_dimensions_changed = false;
++
++         nsIWidget* wid = mWidget->RealWidget();
++         nsWindowType wt = wid ? wid->WindowType() : eWindowType_toplevel;
++
++         uint32_t tex_width, tex_height;
++
++         if (wt == eWindowType_popup)
++         {
++            mozilla::LayoutDeviceIntRect rect = wid->GetClientBounds();
++            tex_width = rect.width;
++            tex_height = rect.height;
++         }
++         else
++         {
++            tex_width = mSize.width;
++            tex_height = mSize.height;
++         }
++
++         // Create a render surface ...
++
++         // Creates a texture surface for rendering.
++
++         // DXGI_FORMAT_B8G8R8A8_UNORM_SRGB
++         CD3D11_TEXTURE2D_DESC desc(DXGI_FORMAT_B8G8R8A8_UNORM, tex_width, tex_height, 1, 1);
++         desc.BindFlags = D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE;
++         desc.MiscFlags = D3D11_RESOURCE_MISC_SHARED;
++         desc.Usage = D3D11_USAGE_DEFAULT;
++
++         HRESULT hr = mDevice->CreateTexture2D(&desc, nullptr, &dest);
++
++         // Create an IPC (named) mutex for the shared texture ...
++         if (dest)
++         {
++            // A shared handle is obtained via DXGI ...
++            IDXGIResource* resource_dxgi = nullptr;
++            dest->QueryInterface(__uuidof(IDXGIResource), (LPVOID*)&resource_dxgi);
++
++            // Grab shared surface handle
++            if (resource_dxgi)
++            {
++               resource_dxgi->GetSharedHandle(&m_status.m_shared_surface_handle);
++               resource_dxgi->Release();
++            }
++
++            // Mutex ID based on shared tex handle so unique across all processes.
++            // Shared texture handles are 32 bit on Windows. Other platforms might be 64 bit.
++            // We don't use a D3D11 keyed mutex as they only work with D3D11.
++            char mutex_id[16]; // we use 13: 4 header + 8 id + '\0' terminator.
++            sprintf(mutex_id, "<><>%08x", (uint32_t) m_status.m_shared_surface_handle);
++
++            m_producer_mutex = ::CreateMutexA(nullptr,  // default security descriptor
++               FALSE,      // mutex not owned
++               mutex_id);
++
++            m_status.m_native_destination = (void*) dest;
++         }
++         else
++            m_status.m_native_destination = nullptr;
++      }
++   }
++
++   return dest;
++}
++#endif // INF_PATCH
++
++
+ bool CompositorD3D11::UpdateRenderTarget() {
+   HRESULT hr;
+ 
+@@ -1654,101 +1762,16 @@
+     return false;
    }
  
--#ifdef INF_PATCH
 -
--  // Performing here fixes youtube full screen but breaks simple video element videocontrols.
+ #ifdef INF_PATCH
 -
--  if (!Gecko_Embed()) {
+-         // TODO: Factor this down to minimize the chance of merge errors.
 -
--     // Dispatch "fullscreenchange" events. Note that the loop order is
--     // reversed so that events are dispatched in the tree order as
--     // indicated in the spec.
--     for (Document* d : Reversed(changed)) {
--       DispatchFullscreenChange(*d, d->GetUnretargetedFullScreenElement());
--     }
+-         if (Gecko_Embed())
+-         {
+-             backBuf = (ID3D11Texture2D *) m_status.m_native_destination;
 -
--  }
--#endif // INF_PATCH
-+  // Dispatch "fullscreenchange" events. Note that the loop order is
-+  // reversed so that events are dispatched in the tree order as
-+  // indicated in the spec.
-+  for (Document* d : Reversed(changed)) {
-+      DispatchFullscreenChange(*d, d->GetUnretargetedFullScreenElement());
-+  }
+-            // Reallocate when required ...
+-            if (backBuf && m_dimensions_changed)
+-            {
+-               m_status.m_native_destination = nullptr;
+-               m_status.m_shared_surface_handle = nullptr;
+- 
+-               backBuf->Release();
+-               backBuf = nullptr;
+-
+-               if (m_producer_mutex) {
+-                 auto mut = m_producer_mutex;
+-                 m_producer_mutex = nullptr;
+-                 mut->Release();
+-               }
+-            }
+-
+-            if (!backBuf)
+-            {
+-               m_dimensions_changed = false;
+-
+-               nsIWidget *wid = mWidget->RealWidget();
+-               nsWindowType wt = wid ? wid->WindowType() : eWindowType_toplevel;
+-
+-               DWORD tex_width, tex_height;
+-
+-               if (wt == eWindowType_popup)
+-               {
+-                  mozilla::LayoutDeviceIntRect rect = wid->GetClientBounds();
+-                  tex_width = rect.width;
+-                  tex_height = rect.height;
+-               }
+-               else
+-               {
+-                  tex_width = mSize.width;
+-                  tex_height = mSize.height;
+-               }
+-
+-               // Create a render surface ...
++if (Gecko_Embed())
++{
++   backBuf = Embed_Update_Render_Target();
  
-   aRequest->MayResolvePromise();
-   return true;
+-               // Creates a texture surface for rendering.
+-
+-               // DXGI_FORMAT_B8G8R8A8_UNORM_SRGB
+-               CD3D11_TEXTURE2D_DESC desc(DXGI_FORMAT_B8G8R8A8_UNORM, tex_width, tex_height, 1, 1);
+-               desc.BindFlags = D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE;
+-               desc.MiscFlags = D3D11_RESOURCE_MISC_SHARED_KEYEDMUTEX;
+-               desc.Usage = D3D11_USAGE_DEFAULT;
+-
+-               hr = mDevice->CreateTexture2D(&desc, nullptr, getter_AddRefs(backBuf));
+-
+-               // Get the keyed mutex for the shared texture
+-               if (backBuf)
+-               {
+-                  hr = backBuf->QueryInterface(__uuidof(IDXGIKeyedMutex), (void**) &m_producer_mutex);
+-
+-                  // A key of 0 is required to initiate access to the mutex (producer only)
+-                  if (m_producer_mutex)
+-                  {
+-                     m_producer_mutex->AcquireSync(0, INFINITE);
+-                     m_producer_mutex->ReleaseSync(__shared_surface_access_key);
+-
+-                     // ... we then switch to our access key.
+-
+-                     // A shared handle is obtained through the DXGI interface ...
+-                     IDXGIResource* resource_dxgi = nullptr;
+-                     backBuf->QueryInterface(__uuidof(IDXGIResource), (LPVOID*) &resource_dxgi);
+-
+-                     // Grab shared surface handle
+-                     if (resource_dxgi) 
+-                     {
+-                       resource_dxgi->GetSharedHandle(&m_status.m_shared_surface_handle);
+-                       resource_dxgi->Release();
+-                     }
+-                  }
+-
+-                  // Ensure DX11 render target texture is accessible from external API.
+-                  m_status.m_native_destination = (void*) backBuf.get();
+-               }
+-               else
+-                  m_status.m_native_destination = nullptr;
+-            }
+-
+-            if (!backBuf)
+-               return false;
+-         }
+-         else
+-         {
++   if (!backBuf)
++      return false;
++}
++else
++{
+ #endif // INF_PATCH
+ 
+   if (mSize.width <= 0 || mSize.height <= 0) {
+@@ -1776,7 +1799,7 @@
+   }
+ 
+ #ifdef INF_PATCH
+-         }
++}
+ #endif  
+ 
+   IntRegion validFront;
+diff --git a/gfx/layers/d3d11/CompositorD3D11.h b/gfx/layers/d3d11/CompositorD3D11.h
+--- a/gfx/layers/d3d11/CompositorD3D11.h
++++ b/gfx/layers/d3d11/CompositorD3D11.h
+@@ -292,9 +292,13 @@
+ 
+ #ifdef INF_PATCH
+ public:
+-   IDXGIKeyedMutex *m_producer_mutex;
++   // We use a Windows named mutex directly as we need access from multiple processes. 
++   // TODO: Figure out how to implement IPC mutex on other platforms for WebRender port.
++   HANDLE m_producer_mutex;
+    bool m_dimensions_changed;
+    Compositor_Status m_status;
++private:
++   ID3D11Texture2D *Embed_Update_Render_Target();
+ #endif // INF_PATCH
+ };
+ 
