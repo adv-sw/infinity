@@ -57,7 +57,7 @@ LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF
 //#include "..\base\inf_util.h"
 
 #define INF_VERBOSE   0
-#define INF_LOG_COMMS 1
+#define INF_LOG_COMMS 0
 
 extern const char* __program_id;
 
